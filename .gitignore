@@ -1,0 +1,17 @@
+# Local browser session: contains authentication cookies
+browser_profile/
+**/browser_profile/
+
+# Local data
+vacancies.json
+*.sqlite
+*.sqlite3
+*.db
+.env
+
+# Python and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
