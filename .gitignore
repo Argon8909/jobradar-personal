@@ -7,7 +7,13 @@ vacancies.json
 *.sqlite
 *.sqlite3
 *.db
+# Secrets (keep the example template versioned)
 .env
+.env.*
+!.env.example
+
+# Optional machine-specific settings
+config.local.json
 
 # Python and local environments
 __pycache__/
