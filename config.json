@@ -1,0 +1,10 @@
+{
+  "ai": {
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "temperature": 0.2
+  },
+  "search": {
+    "limit": 10
+  }
+}
