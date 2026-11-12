@@ -1,0 +1,212 @@
+@startuml JobRadar_ERD
+hide circle
+skinparam linetype ortho
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam entity {
+  BackgroundColor #FCFCFC
+  BorderColor #333333
+}
+
+title JobRadar - целевая модель PostgreSQL (проект)
+
+entity "users" as users {
+  * id : BIGINT <<PK>>
+  --
+  name : TEXT
+  created_at : TIMESTAMPTZ
+}
+
+entity "user_accounts" as accounts {
+  * id : BIGINT <<PK>>
+  --
+  * user_id : BIGINT <<FK>>
+  * provider : TEXT
+  external_user_id : TEXT
+  status : TEXT
+  linked_at : TIMESTAMPTZ
+}
+
+entity "user_profiles" as profiles {
+  * id : BIGINT <<PK>>
+  --
+  * user_id : BIGINT <<FK>>
+  profile_data : JSONB
+  revision : INTEGER
+  updated_at : TIMESTAMPTZ
+}
+
+entity "search_contexts" as contexts {
+  * id : BIGINT <<PK>>
+  --
+  * profile_id : BIGINT <<FK>>
+  title : TEXT
+  criteria : JSONB
+  criteria_revision : INTEGER
+  status : TEXT
+  created_at : TIMESTAMPTZ
+  updated_at : TIMESTAMPTZ
+}
+
+entity "user_sessions" as sessions {
+  * id : BIGINT <<PK>>
+  --
+  * user_id : BIGINT <<FK>>
+  active_context_id : BIGINT <<FK, NULL>>
+  channel : TEXT
+  external_chat_id : TEXT
+  updated_at : TIMESTAMPTZ
+}
+
+entity "messages" as messages {
+  * id : BIGINT <<PK>>
+  --
+  * user_id : BIGINT <<FK>>
+  * session_id : BIGINT <<FK>>
+  context_id : BIGINT <<FK, NULL>>
+  role : TEXT
+  content : TEXT
+  created_at : TIMESTAMPTZ
+}
+
+entity "search_tasks" as search_tasks {
+  * id : BIGINT <<PK>>
+  --
+  * context_id : BIGINT <<FK>>
+  * goal : TEXT
+  * state : TEXT
+  search_queries : JSONB
+  target_count : INTEGER
+  created_at : TIMESTAMPTZ
+  completed_at : TIMESTAMPTZ
+}
+
+entity "vacancies" as vacancies {
+  * id : BIGINT <<PK>>
+  --
+  source : TEXT
+  external_id : TEXT
+  url : TEXT
+  title : TEXT
+  employer : TEXT
+  area : TEXT
+  salary_from : NUMERIC
+  salary_to : NUMERIC
+  salary_currency : TEXT
+  published_at : TIMESTAMPTZ
+  first_seen_at : TIMESTAMPTZ
+  last_seen_at : TIMESTAMPTZ
+  last_checked_at : TIMESTAMPTZ
+  status : TEXT
+  --
+  UNIQUE(source, external_id)
+}
+
+entity "vacancy_cards" as cards {
+  * vacancy_id : BIGINT <<PK, FK>>
+  --
+  profession : TEXT
+  specialization : TEXT
+  summary : TEXT
+  structured_data : JSONB
+  extraction_version : INTEGER
+  extracted_at : TIMESTAMPTZ
+}
+
+entity "vacancy_source_texts" as originals {
+  * vacancy_id : BIGINT <<PK, FK>>
+  --
+  description : TEXT
+  content_hash : TEXT
+  fetched_at : TIMESTAMPTZ
+}
+
+entity "tags" as tags {
+  * id : BIGINT <<PK>>
+  --
+  category : TEXT
+  canonical_name : TEXT
+  --
+  UNIQUE(category, canonical_name)
+}
+
+entity "vacancy_tags" as vt {
+  * vacancy_id : BIGINT <<PK, FK>>
+  * tag_id : BIGINT <<PK, FK>>
+  --
+  requirement_level : TEXT
+  evidence : TEXT
+}
+
+entity "context_vacancies" as cv {
+  * context_id : BIGINT <<PK, FK>>
+  * vacancy_id : BIGINT <<PK, FK>>
+  --
+  relevance_score : NUMERIC
+  decision : TEXT
+  review_status : TEXT
+  profile_revision : INTEGER
+  criteria_revision : INTEGER
+  assessed_at : TIMESTAMPTZ
+}
+
+users ||--o{ accounts : has
+users ||--o{ profiles : has
+users ||--o{ sessions : opens
+users ||--o{ messages : writes
+
+profiles ||--o{ contexts : used_by
+
+contexts |o--o{ sessions : active_in
+contexts |o--o{ messages : discussed_in
+sessions ||--o{ messages : contains
+
+contexts ||--o{ search_tasks : runs
+contexts ||--o{ cv : accumulates
+
+vacancies ||--o{ cv : selected
+vacancies ||--o| cards : described_by
+vacancies ||--o| originals : source_text
+
+vacancies ||--o{ vt : classified
+tags ||--o{ vt : assigned
+
+note right of sessions
+  active_context_id = NULL:
+  общий диалог JobRadar.
+
+  active_context_id задан:
+  работа внутри контекста.
+end note
+
+note right of messages
+  context_id = NULL:
+  сообщение общего диалога.
+
+  context_id задан:
+  сообщение поискового контекста.
+end note
+
+note right of cv
+  Накопитель подходящих вакансий.
+  PK = (context_id, vacancy_id)
+
+  Оценка актуальна, если
+  версии профиля и критериев совпадают.
+end note
+
+note bottom of search_tasks
+  Задание = отдельный запуск поиска.
+  state: pending / running / completed
+  failed / cancelled
+
+  task_vacancies не используем:
+  при сбое поиск запускается заново.
+end note
+
+note right of originals
+  Полные исходные описания
+  хранятся отдельно и могут
+  очищаться по сроку хранения.
+end note
+@enduml
