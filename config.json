@@ -4,7 +4,9 @@
     "model": "deepseek-flash",
     "temperature": 0.2
   },
-  "search": {
-    "limit": 10
+  "agent": {
+    "max_queries": 6,
+    "max_vacancies": 60,
+    "per_query": 10
   }
 }

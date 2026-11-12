@@ -1,21 +1,17 @@
-# Local browser session: contains authentication cookies
-browser_profile/
-**/browser_profile/
-
-# Local data
-vacancies.json
-*.sqlite
-*.sqlite3
-*.db
-# Secrets (keep the example template versioned)
 .env
 .env.*
 !.env.example
-
-# Optional machine-specific settings
+browser_profile/
+**/browser_profile/
+vacancies.json
+analyses.json
+jobradar.db
+jobradar.db-*
+*.db
+*.sqlite
+*.sqlite3
+profile.txt
 config.local.json
-
-# Python and local environments
 __pycache__/
 *.py[cod]
 .venv/

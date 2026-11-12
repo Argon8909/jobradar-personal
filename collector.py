@@ -1,20 +1,16 @@
-"""Пробный сбор вакансий hh.ru через Playwright с постоянной сессией браузера."""
-
+"""Сборщик HH: Playwright и сохранённая локальная сессия браузера."""
 import argparse
 import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
-
 from playwright.sync_api import sync_playwright
 
-
-VACANCY_ID_RE = re.compile(r"/vacancy/(\d+)")
 ROOT = Path(__file__).resolve().parent
-PROFILE_DIR = ROOT / "browser_profile"  # НЕ публиковать: здесь cookies авторизации
-OUTPUT = ROOT / "vacancies.json"
-
+PROFILE_DIR = ROOT / 'browser_profile'
+OUTPUT = ROOT / 'vacancies.json'
+VACANCY_ID_RE = re.compile(r'/vacancy/(\d+)')
 
 def is_challenge(page):
     address = page.url.lower()
@@ -256,71 +252,71 @@ def extract_vacancy(page, vacancy_id, link, debug=False):
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Сбор вакансий HH через браузер')
-    parser.add_argument('--query', default='системный аналитик', help='Поисковая фраза')
-    parser.add_argument('--limit', type=int, default=10, help='Количество вакансий (1–20)')
-    parser.add_argument('--debug-meta', action='store_true', help='Показать подсказки для диагностики формата и графика')
-    parser.add_argument('--login', action='store_true', help='Открыть браузер для входа в HH, не собирать вакансии')
-    args = parser.parse_args()
-    if not 1 <= args.limit <= 20:
-        parser.error('--limit должен быть от 1 до 20')
 
-    search_url = 'https://hh.ru/search/vacancy?' + urlencode({'text': args.query, 'items_on_page': 20})
+def collect_vacancies(query='системный аналитик', limit=10, debug=False):
+    """Собрать вакансии. Выполняется синхронно; не запускать параллельно с другим браузером профиля."""
+    if not isinstance(query, str) or not query.strip() or len(query) > 200:
+        raise ValueError('Поисковый запрос должен содержать от 1 до 200 символов')
+    if not isinstance(limit, int) or not 1 <= limit <= 20:
+        raise ValueError('Количество вакансий должно быть от 1 до 20')
+    search_url = 'https://hh.ru/search/vacancy?' + urlencode({'text': query, 'items_on_page': 20})
     vacancies = []
     with sync_playwright() as playwright:
-        # launch_persistent_context сохраняет cookies, localStorage и вход между запусками.
         context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            headless=False,
-            locale='ru-RU',
-            viewport={'width': 1280, 'height': 900},
+            user_data_dir=str(PROFILE_DIR), headless=False,
+            locale='ru-RU', viewport={'width': 1280, 'height': 900},
         )
         page = context.pages[0] if context.pages else context.new_page()
         try:
-            if args.login:
-                page.goto('https://hh.ru/', wait_until='domcontentloaded', timeout=45000)
-                print('Войди в HH через открытый браузер. Когда закончишь, нажми Enter в терминале.')
-                input()
-                print('Профиль сохранён в папке:', PROFILE_DIR)
-                return
-
-            print(f'Открываю поиск: {search_url}')
+            print(f'Открываю поиск: {search_url}', flush=True)
             page.goto(search_url, wait_until='domcontentloaded', timeout=45000)
             page.wait_for_timeout(2000)
             if is_challenge(page):
-                print('HH запросил проверку. Автоматический сбор остановлен.')
-                return
-
-            links = collect_links(page, args.limit)
-            print(f'Найдено ссылок в выдаче: {len(links)}')
-            if not links:
-                print('Ссылок нет. Проверь открытое окно браузера и актуальность разметки HH.')
-                return
-
+                raise RuntimeError('HH запросил проверку. Сбор остановлен; пройди её вручную в браузере.')
+            links = collect_links(page, limit)
+            print(f'Найдено ссылок: {len(links)}', flush=True)
             for index, (vacancy_id, link) in enumerate(links, 1):
-                print(f'[{index}/{len(links)}] {link}')
                 try:
+                    print(f'[{index}/{len(links)}] {link}', flush=True)
                     page.goto(link, wait_until='domcontentloaded', timeout=45000)
                     page.wait_for_timeout(1000)
                     if is_challenge(page):
-                        print('HH запросил проверку. Останавливаю сбор.')
-                        break
-                    vacancy = extract_vacancy(page, vacancy_id, link, debug=args.debug_meta)
-                    if vacancy is None:
-                        print('  Не удалось прочитать заголовок или описание; пропускаю.')
-                        continue
-                    vacancies.append(vacancy)
-                    print('  Регион:', vacancy['area'] or 'не указан',
-                          '| Формат:', vacancy['work_format'] or 'не указан')
-                except Exception as error:
-                    print(f'  Ошибка обработки: {error}')
+                        raise RuntimeError('HH запросил проверку. Сбор остановлен.')
+                    vacancy = extract_vacancy(page, vacancy_id, link, debug=debug)
+                    if vacancy:
+                        vacancies.append(vacancy)
+                except RuntimeError:
+                    raise
+                except Exception as exc:
+                    print(f'  Ошибка обработки вакансии: {exc}', flush=True)
         finally:
-            if not args.login:
-                OUTPUT.write_text(json.dumps(vacancies, ensure_ascii=False, indent=2), encoding='utf-8')
-                print(f'Сохранено {len(vacancies)} вакансий: {OUTPUT}')
+            OUTPUT.write_text(json.dumps(vacancies, ensure_ascii=False, indent=2), encoding='utf-8')
+            context.close()
+    return vacancies
+
+
+def login():
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(PROFILE_DIR), headless=False, locale='ru-RU',
+            viewport={'width': 1280, 'height': 900},
+        )
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto('https://hh.ru/', wait_until='domcontentloaded', timeout=45000)
+            input('Войди в HH, затем нажми Enter здесь, чтобы закрыть браузер: ')
+        finally:
             context.close()
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='Сбор вакансий HH через Playwright')
+    parser.add_argument('--query', default='системный аналитик')
+    parser.add_argument('--limit', type=int, default=10)
+    parser.add_argument('--debug-meta', action='store_true')
+    parser.add_argument('--login', action='store_true')
+    args = parser.parse_args()
+    if args.login:
+        login()
+    else:
+        print(f'Сохранено {len(collect_vacancies(args.query, args.limit, args.debug_meta))} вакансий')

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>JobRadar — AI агент</title>
+<style>
+:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color-scheme:dark;background:#0c111b;color:#ebf0fa}*{box-sizing:border-box}
+body{margin:0}.layout{display:grid;grid-template-columns:minmax(0,1fr) 290px;max-width:1400px;margin:auto;height:100dvh;min-height:500px}.main{min-width:0;display:flex;flex-direction:column;border-right:1px solid #283249}
+header{height:64px;border-bottom:1px solid #283249;display:flex;align-items:center;justify-content:space-between;padding:0 24px}h1{font-size:18px;margin:0;letter-spacing:.2px}small,.muted{color:#91a0bd}#chat{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:22px;display:flex;flex-direction:column;gap:14px}
+.bubble{padding:13px 16px;border-radius:15px;white-space:pre-wrap;line-height:1.5;max-width:88%;overflow-wrap:anywhere}.bubble.user{background:#234a73;align-self:flex-end}.bubble.assistant{background:#192236;border:1px solid #303a50;align-self:flex-start}.who{color:#a5b5d2;font-size:11px;margin-bottom:5px}
+.composer{padding:14px 22px 20px;border-top:1px solid #283249;display:flex;gap:10px;align-items:end}.composer textarea{background:#131d2e;color:#fff;border:1px solid #35445c;resize:none;min-height:52px;max-height:140px;padding:13px;border-radius:12px;flex:1;font:inherit;outline:none}.composer textarea:focus{border-color:#619ddd}button{cursor:pointer;color:#fff;background:#3778bc;border:0;border-radius:11px;padding:13px 18px;font:inherit}button:disabled{opacity:.6;cursor:wait}.attach{background:#26334b;padding:12px;font-size:22px}aside{padding:22px;overflow:auto}aside h2{font-size:13px;color:#94a4bf;font-weight:600;letter-spacing:.7px;text-transform:uppercase;margin:0 0 15px}.panel{background:#141e30;padding:14px;border:1px solid #2d384d;border-radius:13px;margin-bottom:18px;font-size:13px;line-height:1.6}.panel strong{font-size:16px}#events>div,#results>div{margin:9px 0;padding-bottom:8px;border-bottom:1px solid #263249;overflow-wrap:anywhere}a{color:#89c2ff}#status{font-size:13px;color:#9bafcc}#counts{color:#a0b1cc;font-size:12px;margin-top:8px}.hint{color:#b4c3db;font-size:13px;line-height:1.5}.error{color:#ffb4b4}@media(max-width:800px){.layout{grid-template-columns:1fr}aside{display:none}.bubble{max-width:96%}header{padding:0 15px}.composer{padding:10px}}
+</style></head>
+<body><div class="layout">
+<div class="main"><header><h1>◉ JobRadar <small>AI-агент</small></h1><span id="status">Готов</span></header>
+<div id="chat" aria-live="polite"><div class="bubble assistant"><div class="who">JobRadar</div>Привет. Можешь попросить меня найти вакансии, скорректировать опыт, показать результаты или остановить поиск. Поиск продолжится, пока мы общаемся.</div></div>
+<form class="composer" id="form"><input type="file" id="file" hidden accept=".txt,.md,.docx,.pdf"><button type="button" class="attach" id="attach" title="Прикрепить резюме">＋</button><textarea id="message" placeholder="Напиши задачу или уточнение…" rows="2" maxlength="20000"></textarea><button id="send" type="submit">Отправить</button></form><div id="upload-status" style="padding:0 22px 10px;color:#b4c3db;font-size:12px" aria-live="polite"></div>
+</div><aside><h2>Фоновый поиск</h2><div class="panel"><strong id="task">Нет активной задачи</strong><div id="counts">Вакансий: 0</div><div class="hint">Для запуска напиши: «Ищи автономно вакансии аналитиков AI-интеграций».</div></div><h2>События</h2><div class="panel" id="events">Пока нет событий</div><h2>Подходящие вакансии</h2><div class="panel" id="results">Результаты появятся по мере анализа</div></aside></div>
+<script>
+const chatEl=document.getElementById('chat'),form=document.getElementById('form'),input=document.getElementById('message'),send=document.getElementById('send');
+let latestId=0,busy=false;
+function nearBottom(){return chatEl.scrollHeight-chatEl.scrollTop-chatEl.clientHeight<110;}
+function addMessage(role,text,scroll=true){const follow=scroll&&nearBottom();const wrap=document.createElement('div');wrap.className='bubble '+role;const label=document.createElement('div');label.className='who';label.textContent=role==='user'?'Вы':'JobRadar';wrap.append(label,document.createTextNode(text));chatEl.append(wrap);if(follow)chatEl.scrollTop=chatEl.scrollHeight;}
+function syncMessages(messages){
+  if(!messages.length)return;
+  // A new entry is appended without rebuilding the chat or moving the reader.
+  const incoming=messages.filter(m=>m.id>latestId);
+  if(!incoming.length)return;
+  // When the first server messages arrive, remove the static welcome bubble.
+  if(latestId===0)chatEl.innerHTML='';
+  // An optimistic user message may already be rendered: replace it with server state.
+  const optimistic=chatEl.querySelector('[data-pending="1"]');
+  if(optimistic)optimistic.remove();
+  const follow=nearBottom();
+  incoming.forEach(m=>addMessage(m.role,m.content,false));
+  latestId=messages[messages.length-1].id;
+  if(follow)chatEl.scrollTop=chatEl.scrollHeight;
+}
+async function api(url,opts){const r=await fetch(url,opts);const data=await r.json();if(!r.ok)throw Error(data.error||'Ошибка запроса');return data;}
+async function refresh(){try{const s=await api('/api/state');const t=s.task;document.getElementById('status').textContent=t&&['running','stopping'].includes(t.state)?'● Поиск выполняется':'● Готов';document.getElementById('task').textContent=t?({'running':'Ищем','completed':'Завершено','failed':'Ошибка','stopping':'Останавливаем','stopped':'Остановлено','interrupted':'Прервано'}[t.state]||t.state)+' · задача #'+t.id:'Нет активной задачи';document.getElementById('counts').textContent=`Вакансий: ${s.counts.vacancies} · Оценок: ${s.counts.analyses}`+(t?` · Запросов: ${t.queries_done} · Проверено: ${t.checked}`:'');syncMessages(s.messages);const ev=document.getElementById('events');ev.innerHTML='';(s.events||[]).slice(-9).reverse().forEach(e=>{const el=document.createElement('div');el.textContent=e.content;ev.append(el)});if(!ev.children.length)ev.textContent='Пока нет событий';const res=document.getElementById('results');res.innerHTML='';(s.results||[]).filter(r=>['подходит сейчас','смежная перспективная'].includes(r.analysis.analysis.category)).slice(0,7).forEach(r=>{const el=document.createElement('div'),a=document.createElement('a');a.href=r.vacancy.url;a.target='_blank';a.rel='noopener noreferrer';a.textContent=r.vacancy.title||r.vacancy.id;el.append(a);res.append(el)});if(!res.children.length)res.textContent='Пока нет подходящих оценок';}catch(e){document.getElementById('status').textContent='Ошибка соединения';}}
+form.addEventListener('submit',async e=>{e.preventDefault();const msg=input.value.trim();if(!msg||busy)return;busy=true;send.disabled=true;input.value='';addMessage('user',msg);chatEl.lastElementChild.dataset.pending='1';chatEl.scrollTop=chatEl.scrollHeight;try{const r=await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});await refresh();}catch(e){addMessage('assistant','Ошибка: '+e.message);}finally{busy=false;send.disabled=false;refresh();input.focus();}});
+input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();form.requestSubmit();}});
+document.getElementById('attach').addEventListener('click',()=>document.getElementById('file').click());
+document.getElementById('file').addEventListener('change',async e=>{const f=e.target.files[0];if(!f)return;const d=new FormData();d.append('file',f);try{const r=await api('/api/resume',{method:'POST',body:d});input.value=`Разбери загруженное резюме #${r.resume_id}, сохрани подтверждённые навыки и опыт в мой профиль. Не придумывай ничего сверх текста.`;document.getElementById('upload-status').textContent=`Загружено: ${r.filename} (резюме #${r.resume_id}). Нажми «Отправить», чтобы начать анализ.`;input.focus();}catch(err){addMessage('assistant','Не удалось прикрепить резюме: '+err.message);}e.target.value='';});
+refresh();setInterval(refresh,3000);
+</script></body></html>
