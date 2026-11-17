@@ -5,6 +5,7 @@ import json
 from jsonschema import Draft202012Validator, ValidationError
 
 from jobradar.llm.client import LLMError
+from jobradar.events import collect
 from jobradar.profiles import ProfileError
 from jobradar.profiles.contracts import validate
 from jobradar.storage.chat import ChatHistory
@@ -109,6 +110,9 @@ class DialogueAgent:
             return
 
     def chat(self, text):
+        return collect(self.events(text))
+
+    def events(self, text):
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Message must be a nonempty string")
         self._llm_calls = 0
@@ -131,7 +135,7 @@ class DialogueAgent:
                     state = current
                 context = {"state":state, "profiles":self.manager.list_profiles()["profiles"],
                            "authorized_actions":[json.loads(key) for key in sorted(grants)],
-                           "availability":"Поиск и результаты вакансий ещё не подключены."}
+                           "unavailable_tools":sorted(set(DEFINITIONS) - set(self.dispatcher.registry.handlers))}
                 response = self._complete(messages + [{"role":"user", "content":json.dumps(context, ensure_ascii=False)}],
                                           tools=definitions(state))
                 calls = response.get("tool_calls") or []
@@ -161,13 +165,16 @@ class DialogueAgent:
                         previous_signature, previous = seen[call_id]
                         result = previous if signature == previous_signature else failure("VALIDATION_ERROR", "ID вызова уже использован.")
                     else:
-                        result = self.dispatcher.execute(name, arguments, expected_state=state,
-                                                         grant=signature if signature in grants else None)
+                        result = yield from self.dispatcher.events(name, arguments, expected_state=state,
+                                                                  grant=signature if signature in grants else None,request_text=text)
                         grants.discard(signature)
                         seen[call_id] = (signature, result)
                         if result["status"] == "success":
                             if name not in READ_ONLY:
-                                notices.append("Выполнено: " + describe(name, result["data"].get("updated_fields", arguments)))
+                                if name == "search_vacancies":
+                                    notices.append(result["data"]["summary"])
+                                else:
+                                    notices.append("Выполнено: " + describe(name, result["data"].get("updated_fields", arguments)))
                                 self.pending = None
                             state = self.manager.get_state()
                         elif result["error"]["code"] == "CONFIRMATION_REQUIRED":
@@ -196,5 +203,7 @@ class DialogueAgent:
             answer = "\n".join(notices + [str(exc)])
             self.pending = None
         self.history.append([{"role":"assistant", "content":answer}], self.manager.get_state()["active_context_id"])
-        return {"answer":answer, "calls":results, "llm_calls":self._llm_calls,
-                "active_context_id":self.manager.get_state()["active_context_id"]}
+        result = {"answer":answer, "calls":results, "llm_calls":self._llm_calls,
+                  "active_context_id":self.manager.get_state()["active_context_id"]}
+        yield {"event":"answer","data":result}
+        return result

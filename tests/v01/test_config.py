@@ -15,7 +15,7 @@ class ConfigurationTests(unittest.TestCase):
         settings = load_settings(ROOT / "config/v0.1.json")
         self.assertEqual(settings.database_path, ROOT / "data/jobradar-v0.1.sqlite3")
         self.assertEqual(settings.prompts_dir, ROOT / "prompts")
-        self.assertEqual(settings.values["search"], {"max_source_vacancies":100,"max_new_analyses":30,"deadline_seconds":600})
+        self.assertEqual(settings.values["search"], {"max_source_vacancies":100,"max_new_analyses":30,"deadline_seconds":600,"max_llm_calls":100,"target_count":20})
         self.assertEqual(settings.values["llm"]["timeout_seconds"], 60)
         self.assertEqual(settings.values["source"]["page_timeout_seconds"], 30)
 

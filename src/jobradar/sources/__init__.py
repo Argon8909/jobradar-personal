@@ -1,1 +1,1 @@
-"""Source adapter boundary; HH.ru will be the first implementation."""
+"""Vacancy source contract and the HH.ru Playwright adapter."""

@@ -79,6 +79,23 @@ class ClientTests(unittest.TestCase):
             with patch.dict(os.environ, {"DEEPSEEK_API_KEY":""}):
                 self.assertEqual(read_api_key(path), "file-key")
 
+    def test_deadline_exhaustion_does_not_start_new_http_request(self):
+        import time
+        opener = Mock()
+        with self.assertRaises(LLMError):
+            self.client(opener).complete([],deadline=time.monotonic()-1)
+        opener.assert_not_called()
+
+    def test_usage_diagnostics_do_not_include_secrets_or_message_text(self):
+        payload = {"choices":[{"message":{"role":"assistant","content":"private-response"}}],
+                   "usage":{"total_tokens":3,"api_key":"private-key"}}
+        opener = Mock(return_value=io.BytesIO(json.dumps(payload).encode()))
+        with self.assertLogs("jobradar",level="INFO") as logs:
+            self.client(opener).complete([{"role":"user","content":"private-message"}])
+        text = "\n".join(logs.output)
+        self.assertIn('"total_tokens": 3',text)
+        self.assertNotIn("private-",text)
+
 
 if __name__ == "__main__":
     unittest.main()

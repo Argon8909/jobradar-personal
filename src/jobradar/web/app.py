@@ -1,13 +1,14 @@
 """Local Flask adapter; dialogue, permissions and storage remain in services."""
 
 import hmac
+import json
 import os
 import secrets
 import sqlite3
 import threading
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request, session
+from flask import Flask, Response, jsonify, render_template, request, session, stream_with_context
 
 from jobradar.orchestration.service import Orchestrator
 from jobradar.profiles import ProfileError
@@ -31,6 +32,8 @@ def session_secret(env_path: Path):
 
 
 def create_app(database, settings, *, secret_key=None, client_factory=None):
+    from jobradar.storage.search import recover_interrupted
+    recover_interrupted(database)
     app = Flask(__name__)
     app.config.update(
         SECRET_KEY=secret_key or session_secret(settings.config_path.parent.parent / ".env"),
@@ -117,6 +120,28 @@ def create_app(database, settings, *, secret_key=None, client_factory=None):
         # not enqueue another turn while the first one is awaiting DeepSeek.
         if not service.lock.acquire(blocking=False):
             return jsonify(error={"code":"CHAT_BUSY", "message":"Дождитесь ответа на предыдущее сообщение."}), 409
+        if request.accept_mimetypes.best == "application/x-ndjson":
+            released = False
+            def release():
+                nonlocal released
+                if not released:
+                    released = True
+                    service.lock.release()
+            @stream_with_context
+            def stream():
+                try:
+                    yield json.dumps({"event":"accepted","data":{}},ensure_ascii=False) + "\n"
+                    for event in service.events(body["message"].strip()):
+                        if event["event"] == "answer":
+                            result = event["data"]
+                            event = {"event":"answer","data":{"answer":result["answer"],
+                                     **({"error":result["error"]} if "error" in result else {})}}
+                        yield json.dumps(event,ensure_ascii=False) + "\n"
+                finally:
+                    release()
+            response = Response(stream(),mimetype="application/x-ndjson")
+            response.call_on_close(release)
+            return response
         try:
             result = service.chat(body["message"].strip())
             if "error" in result:

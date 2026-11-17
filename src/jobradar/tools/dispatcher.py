@@ -2,10 +2,12 @@
 
 import json
 import sqlite3
+from types import GeneratorType
 
 from jobradar.profiles import ProfileError, ProfileManager
 from jobradar.profiles.contracts import validate
 from .registry import READ_ONLY, ToolRegistry, allowed_names
+from jobradar.events import collect
 
 
 def canonical(name, arguments):
@@ -36,7 +38,10 @@ class ToolDispatcher:
             return getattr(manager, name)(**arguments, **kwargs)
         return run
 
-    def execute(self, name, arguments, *, expected_state, grant=None):
+    def execute(self, name, arguments, *, expected_state, grant=None, request_text=None):
+        return collect(self.events(name,arguments,expected_state=expected_state,grant=grant,request_text=request_text))
+
+    def events(self, name, arguments, *, expected_state, grant=None, request_text=None):
         """grant/expected_state are internal application data, never tool arguments."""
         try:
             if self.manager.get_state() != expected_state:
@@ -51,7 +56,12 @@ class ToolDispatcher:
                 return failure("SOURCE_UNAVAILABLE", "Поиск и выдача вакансий ещё не подключены.")
             guarded = ProfileManager(self.manager.database, self.manager.user_id, self.manager.session_id,
                                      expected_context_id=expected_state["active_context_id"])
-            return {"status":"success", "data":handler(guarded, arguments, expected_state)}
+            if name == "search_vacancies" and "request" not in arguments and request_text:
+                arguments = {**arguments,"request":request_text}
+            data = handler(guarded, arguments, expected_state)
+            if isinstance(data,GeneratorType):
+                data = yield from data
+            return {"status":"success", "data":data}
         except ProfileError as exc:
             return failure(exc.code, str(exc), exc.retryable)
         except sqlite3.Error:

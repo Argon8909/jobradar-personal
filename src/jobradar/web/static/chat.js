@@ -11,6 +11,39 @@ async function api(url, options = {}) {
   if (!response.ok) throw new Error(body.error?.message || "Не удалось выполнить запрос.");
   return body;
 }
+async function sendMessage(text) {
+  const response = await fetch("/api/chat", {method:"POST", credentials:"same-origin",
+    headers:{"Content-Type":"application/json", "Accept":"application/x-ndjson", "X-JobRadar-CSRF":csrf},
+    body:JSON.stringify({message:text})});
+  if (!response.ok) {
+    const body = await response.json();
+    throw new Error(body.error?.message || "Не удалось выполнить запрос.");
+  }
+  const reader = response.body.getReader(), decoder = new TextDecoder();
+  let buffer = "", completed = false;
+  function accept(line) {
+    if (!line.trim()) return;
+    const event = JSON.parse(line), data = event.data;
+    if (event.event === "search_started") byId("status").textContent = "Поиск запущен";
+    if (event.event === "search_progress") byId("status").textContent = `Поиск: получено ${data.collected_count}, оценено ${data.evaluated_count}`;
+    if (event.event === "search_finished") byId("status").textContent = data.message;
+    if (event.event === "assessment_progress") byId("status").textContent = data.message;
+    if (event.event === "answer") {
+      completed = true;
+      if (data.error) throw new Error(data.answer);
+    }
+  }
+  try {
+    while (true) {
+      const {value, done} = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), {stream:!done});
+      const lines = buffer.split("\n"); buffer = lines.pop();
+      for (const line of lines) accept(line);
+      if (done) { accept(buffer); break; }
+    }
+    if (!completed) throw new Error("Соединение закрыто до завершения ответа.");
+  } finally { reader.releaseLock(); }
+}
 function showError(message) {
   byId("error-text").textContent = message;
   byId("error").hidden = !message;
@@ -34,7 +67,15 @@ function messageNode(message) {
   label.textContent = message.role === "user" ? "Вы" : "JobRadar";
   const content = document.createElement("div"); content.className = "message-content";
   // User, resume and model content are text, never executable HTML.
-  content.textContent = message.content;
+  let position = 0;
+  for (const match of message.content.matchAll(/https?:\/\/[^\s<>"']+/g)) {
+    const url = match[0].replace(/[),.;!?]+$/, "");
+    content.append(document.createTextNode(message.content.slice(position, match.index)));
+    const link = document.createElement("a"); link.href = url; link.textContent = url;
+    link.target = "_blank"; link.rel = "noopener noreferrer";
+    content.append(link); position = match.index + url.length;
+  }
+  content.append(document.createTextNode(message.content.slice(position)));
   body.append(label, content); row.append(avatar, body);
   return row;
 }
@@ -80,7 +121,7 @@ form.addEventListener("submit", async event => {
   const pending = messageNode({role:"user", content:text}); pending.classList.add("pending");
   messages.append(pending); conversation.scrollTop = conversation.scrollHeight;
   try {
-    await api("/api/chat", {method:"POST", headers:{"Content-Type":"application/json", "X-JobRadar-CSRF":csrf}, body:JSON.stringify({message:text})});
+    await sendMessage(text);
     input.value = ""; input.style.height = "auto";
     await refresh();
   } catch (error) {

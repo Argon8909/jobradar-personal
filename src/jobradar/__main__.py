@@ -1,6 +1,7 @@
 """Initialize SQLite or run the v0.1 dialogue in a local terminal."""
 
 import argparse
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -10,10 +11,11 @@ from .storage import Database, SchemaError
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="JobRadar v0.1")
-    parser.add_argument("command", choices=["init-db", "chat", "serve"])
+    parser.add_argument("command", choices=["init-db", "chat", "serve", "hh-login"])
     parser.add_argument("--config", type=Path, default=Path("config/v0.1.json"))
     parser.add_argument("--session", type=int, help="Resume a saved web/CLI session")
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO,format="%(message)s")
     try:
         settings = load_settings(args.config)
         database = Database(settings.database_path, busy_timeout_ms=settings.busy_timeout_ms)
@@ -31,7 +33,18 @@ def main() -> int:
         app = create_app(database, settings)
         app.run(host=host, port=settings.values["web"]["port"], debug=False, use_reloader=False, threaded=True)
         return 0
+    if args.command == "hh-login":
+        from .sources.hh import HHAdapter
+        from .sources.base import SourceError
+        try:
+            HHAdapter(settings).login()
+        except SourceError as error:
+            parser.exit(1,str(error)+"\n")
+        print("Браузерный профиль HH.ru сохранён локально.")
+        return 0
     from .orchestration.service import Orchestrator
+    from .storage.search import recover_interrupted
+    recover_interrupted(database)
     orchestrator = Orchestrator(database, settings, session_id=args.session)
     print(f"JobRadar v0.1 — сессия {orchestrator.session_id}. Для выхода: /exit")
     while True:
@@ -42,7 +55,11 @@ def main() -> int:
         if message == "/exit":
             break
         if message:
-            print(orchestrator.chat(message)["answer"])
+            for event in orchestrator.events(message):
+                if event["event"] == "search_started":
+                    print(event["data"]["message"],flush=True)
+                elif event["event"] == "answer":
+                    print(event["data"]["answer"])
     return 0
 
 

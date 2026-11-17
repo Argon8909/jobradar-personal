@@ -1,1 +1,1 @@
-"""Synchronous Search/Task Manager and Search Planner boundary."""
+"""Bounded synchronous search tasks and event-based progress."""

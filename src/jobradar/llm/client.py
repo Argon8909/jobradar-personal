@@ -5,6 +5,7 @@ import os
 import time
 from pathlib import Path
 from urllib import error, request
+from jobradar.diagnostics import record
 
 
 class LLMError(RuntimeError):
@@ -32,11 +33,12 @@ class DeepSeekClient:
         self._opener = opener
         self._sleep = sleeper
 
-    def complete(self, messages, *, tools=None, json_mode=False):
+    def complete(self, messages, *, tools=None, json_mode=False, deadline=None):
         options = self.settings.values["llm"]
         key = self._key or read_api_key(self.settings.config_path.parent.parent / ".env")
         payload = {"model": options["model"], "messages": messages,
                    "temperature": options["temperature"], "stream": False,
+                   "thinking":{"type":"disabled"},
                    "max_tokens": options.get("max_tokens", 3200)}
         if tools:
             payload.update(tools=tools, tool_choice="auto")
@@ -47,8 +49,14 @@ class DeepSeekClient:
                               headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
         retries = self.settings.values["retries"]["max_safe_retries"]
         for attempt in range(retries + 1):
+            timeout = options["timeout_seconds"]
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LLMError("Достигнут предел времени поисковой задачи.")
+                timeout = min(timeout,remaining)
             try:
-                with self._opener(req, timeout=options["timeout_seconds"]) as response:
+                with self._opener(req, timeout=timeout) as response:
                     result = json.load(response)
                 choice = result["choices"][0]
                 if choice.get("finish_reason") == "length":
@@ -64,16 +72,24 @@ class DeepSeekClient:
                     raise ValueError()
                 if not content and not calls:
                     raise ValueError()
+                usage = result.get("usage",{})
+                safe_usage = {key:value for key,value in usage.items() if key in ("prompt_tokens","completion_tokens","total_tokens")
+                              and type(value) is int and value >= 0} if isinstance(usage,dict) else {}
+                record("llm","generation_completed",attempt=attempt+1,**safe_usage)
                 return {"role": "assistant", "content": content,
                         **({"tool_calls": calls} if calls else {})}
             except error.HTTPError as exc:
                 retryable = exc.code == 429 or 500 <= exc.code <= 599
+                message = {400:"Проверьте модель и параметры запроса DeepSeek.",401:"Проверьте API-ключ DeepSeek.",
+                           402:"Проверьте баланс DeepSeek.",403:"DeepSeek отклонил доступ.",
+                           429:"Превышен лимит запросов DeepSeek."}.get(exc.code,"Ошибка HTTP при обращении к DeepSeek.")
                 exc.close()
-                failure = LLMError("Ошибка HTTP при обращении к DeepSeek.", retryable=retryable)
+                failure = LLMError(message, retryable=retryable)
             except (error.URLError, TimeoutError, ConnectionError, OSError):
                 failure = LLMError("DeepSeek временно недоступен.", retryable=True)
             except (ValueError, KeyError, IndexError, TypeError):
                 raise LLMError("DeepSeek вернул некорректный ответ.") from None
             if not failure.retryable or attempt == retries:
+                record("llm","generation_failed",attempt=attempt+1,retryable=failure.retryable)
                 raise failure from None
             self._sleep(min(0.5 * 2 ** attempt, 2))

@@ -1,1 +1,1 @@
-"""Vacancy Analyzer and Tag Resolver boundary."""
+"""Validated vacancy extraction, personal assessment and semantic tag resolution."""
