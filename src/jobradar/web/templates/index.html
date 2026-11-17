@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JobRadar — ваш следующий шаг</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='chat.css') }}">
+  <script src="{{ url_for('static', filename='chat.js') }}" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="JobRadar, главная"><span class="brand-icon" aria-hidden="true">◉</span> JobRadar <span class="version">0.1</span></a>
+    <div class="sidebar-section"><span class="eyebrow">ВАШИ НАПРАВЛЕНИЯ</span><div id="profiles"><p class="muted">Загружаем профили…</p></div></div>
+    <div class="sidebar-note"><span aria-hidden="true"><svg class="arrow-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5M5 5h14v14"/></svg></span><p>Разные профессии.<br>Разные возможности.<br><strong>Один разговор.</strong></p></div>
+    <div class="local"><span class="dot"></span> Локальное приложение</div>
+  </aside>
+  <main>
+    <header class="chat-header"><div><span class="eyebrow">ПРОСТРАНСТВО ДЛЯ СЛЕДУЮЩЕГО ШАГА</span><h1 id="context-title">Общий диалог</h1><p id="context-subtitle">Обсудим ваш опыт и подходящую работу</p></div><span class="header-badge">Ассистент по трудоустройству</span></header>
+    <div id="error" class="error" role="alert" hidden><span id="error-text"></span><button id="refresh" type="button">Обновить историю</button></div>
+    <section id="conversation" class="conversation" aria-label="История диалога" aria-busy="true">
+      <button id="older" class="older" type="button" hidden>Показать предыдущие сообщения</button>
+      <div id="empty" class="empty" hidden><div class="empty-symbol" aria-hidden="true"><svg class="arrow-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5M5 5h14v14"/></svg></div><span class="eyebrow">РАБОТА НАЧИНАЕТСЯ С ВАС</span><h2>Куда двигаемся дальше?</h2><p>Расскажите о своей профессии, опыте<br class="desktop-break"> и о том, какую работу хотите найти.</p><div class="suggestions"><button type="button" data-message="Помоги разобраться, какая работа мне подойдёт">Обсудить направление <span><svg class="arrow-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5M5 5h14v14"/></svg></span></button><button type="button" data-message="Хочу создать профессиональный профиль">Создать профиль <span><svg class="arrow-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5M5 5h14v14"/></svg></span></button></div></div>
+      <div id="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
+    </section>
+    <footer class="composer-area"><div id="status" class="status" role="status" aria-live="polite">Подключаемся…</div><form id="chat-form"><label class="sr-only" for="message">Сообщение ассистенту</label><textarea id="message" placeholder="Расскажите, какую работу вы ищете…" rows="1" maxlength="60000" disabled></textarea><button id="send" type="submit" aria-label="Отправить сообщение" disabled>↑</button></form><div class="composer-hints"><span>Enter — отправить · Shift + Enter — новая строка</span><span>Поиск вакансий пока недоступен</span></div></footer>
+  </main>
+</body>
+</html>

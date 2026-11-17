@@ -10,7 +10,7 @@ from .storage import Database, SchemaError
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="JobRadar v0.1")
-    parser.add_argument("command", choices=["init-db", "chat"])
+    parser.add_argument("command", choices=["init-db", "chat", "serve"])
     parser.add_argument("--config", type=Path, default=Path("config/v0.1.json"))
     parser.add_argument("--session", type=int, help="Resume a saved web/CLI session")
     args = parser.parse_args()
@@ -22,6 +22,14 @@ def main() -> int:
         parser.exit(1, f"Initialization failed: {error}\n")
     if args.command == "init-db":
         print(f"SQLite v0.1 initialized: {settings.database_path}")
+        return 0
+    if args.command == "serve":
+        from .web.app import create_app
+        host = settings.values["web"]["host"]
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            parser.exit(1, "Flask v0.1 must listen on a loopback address.\n")
+        app = create_app(database, settings)
+        app.run(host=host, port=settings.values["web"]["port"], debug=False, use_reloader=False, threaded=True)
         return 0
     from .orchestration.service import Orchestrator
     orchestrator = Orchestrator(database, settings, session_id=args.session)

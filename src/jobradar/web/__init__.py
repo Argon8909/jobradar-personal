@@ -1,1 +1,1 @@
-"""Flask UI adapter boundary; stage 1 does not expose an HTTP server."""
+"""Local Flask chat adapter for JobRadar v0.1."""
