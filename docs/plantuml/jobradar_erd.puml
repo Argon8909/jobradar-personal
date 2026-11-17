@@ -77,8 +77,17 @@ entity "search_tasks" as search_tasks {
   * state : TEXT
   search_queries : JSONB
   target_count : INTEGER
+  is_partial : BOOLEAN
+  stop_reason : TEXT
   created_at : TIMESTAMPTZ
   completed_at : TIMESTAMPTZ
+}
+
+entity "task_vacancies" as task_vacancies {
+  * task_id : BIGINT <<PK, FK>>
+  * vacancy_id : BIGINT <<PK, FK>>
+  --
+  origin : TEXT
 }
 
 entity "vacancies" as vacancies {
@@ -89,15 +98,14 @@ entity "vacancies" as vacancies {
   url : TEXT
   title : TEXT
   employer : TEXT
-  area : TEXT
-  salary_from : NUMERIC
-  salary_to : NUMERIC
-  salary_currency : TEXT
+  description : TEXT
+  content_hash : TEXT
+  status : TEXT
   published_at : TIMESTAMPTZ
   first_seen_at : TIMESTAMPTZ
   last_seen_at : TIMESTAMPTZ
   last_checked_at : TIMESTAMPTZ
-  status : TEXT
+  fetched_at : TIMESTAMPTZ
   --
   UNIQUE(source, external_id)
 }
@@ -107,18 +115,17 @@ entity "vacancy_cards" as cards {
   --
   profession : TEXT
   specialization : TEXT
+  area : TEXT
+  work_format : TEXT
+  salary_from : NUMERIC
+  salary_to : NUMERIC
+  salary_currency : TEXT
+  experience_min : NUMERIC
   summary : TEXT
   structured_data : JSONB
+  source_hash : TEXT
   extraction_version : INTEGER
   extracted_at : TIMESTAMPTZ
-}
-
-entity "vacancy_source_texts" as originals {
-  * vacancy_id : BIGINT <<PK, FK>>
-  --
-  description : TEXT
-  content_hash : TEXT
-  fetched_at : TIMESTAMPTZ
 }
 
 entity "tags" as tags {
@@ -126,8 +133,18 @@ entity "tags" as tags {
   --
   category : TEXT
   canonical_name : TEXT
+  created_at : TIMESTAMPTZ
   --
   UNIQUE(category, canonical_name)
+}
+
+entity "tag_aliases" as ta {
+  * id : BIGINT <<PK>>
+  --
+  * tag_id : BIGINT <<FK>>
+  * alias : TEXT
+  normalized_alias : TEXT
+  created_at : TIMESTAMPTZ
 }
 
 entity "vacancy_tags" as vt {
@@ -144,6 +161,7 @@ entity "context_vacancies" as cv {
   --
   relevance_score : NUMERIC
   decision : TEXT
+  reasoning : TEXT
   review_status : TEXT
   profile_revision : INTEGER
   criteria_revision : INTEGER
@@ -162,14 +180,16 @@ contexts |o--o{ messages : discussed_in
 sessions ||--o{ messages : contains
 
 contexts ||--o{ search_tasks : runs
+search_tasks ||--o{ task_vacancies : finds
+vacancies ||--o{ task_vacancies : present_in
 contexts ||--o{ cv : accumulates
 
 vacancies ||--o{ cv : selected
 vacancies ||--o| cards : described_by
-vacancies ||--o| originals : source_text
 
-vacancies ||--o{ vt : classified
+cards ||--o{ vt : classified
 tags ||--o{ vt : assigned
+tags ||--o{ ta : has_alias
 
 note right of sessions
   active_context_id = NULL:
@@ -188,7 +208,7 @@ note right of messages
 end note
 
 note right of cv
-  Накопитель подходящих вакансий.
+  Персональная оценка в контексте.
   PK = (context_id, vacancy_id)
 
   Оценка актуальна, если
@@ -200,13 +220,40 @@ note bottom of search_tasks
   state: pending / running / completed
   failed / cancelled
 
-  task_vacancies не используем:
-  при сбое поиск запускается заново.
+  Связь с найденными вакансиями
+  хранится в task_vacancies.
 end note
 
-note right of originals
-  Полные исходные описания
-  хранятся отдельно и могут
-  очищаться по сроку хранения.
+note right of task_vacancies
+  PK = (task_id, vacancy_id)
+  origin = источник обнаружения;
+  независимый состав каждой задачи.
+end note
+
+note right of vacancies
+  Исходник с полным текстом.
+  Никакой LLM-нормализации.
+end note
+
+note right of cards
+  Создаётся LLM и переиспользуется;
+  основные фильтры - в колонках,
+  детализация - в structured_data.
+end note
+
+note right of ta
+  Синонимы канонических тегов.
+  LLM решает смысловое совпадение,
+  Python проверяет и сохраняет.
+  Индекс по normalized_alias;
+  Внутри категории alias указывает
+  только на один канонический tag;
+  неоднозначные имена проверяются.
+end note
+
+note right of vt
+  FK на vacancy_cards.vacancy_id.
+  required / optional / mentioned
+  evidence: фрагмент исходника.
 end note
 @enduml

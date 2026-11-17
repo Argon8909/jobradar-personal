@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jobradar-personal"
+version = "0.1.0"
+description = "JobRadar local technical prototype"
+requires-python = ">=3.11"
+dependencies = ["Flask>=3.0,<4", "playwright>=1.50,<2"]
+
+[project.scripts]
+jobradar = "jobradar.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"jobradar.storage" = ["schema.sql"]

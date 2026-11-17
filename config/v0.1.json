@@ -1,0 +1,11 @@
+{
+  "database": {"path": "../data/jobradar-v0.1.sqlite3", "busy_timeout_ms": 15000},
+  "prompts_dir": "../prompts",
+  "llm": {"provider": "deepseek", "model": "deepseek-flash", "base_url": "https://api.deepseek.com", "temperature": 0.2, "timeout_seconds": 60},
+  "dialogue": {"max_tool_calls": 20},
+  "search": {"max_source_vacancies": 100, "max_new_analyses": 30, "deadline_seconds": 600},
+  "source": {"page_timeout_seconds": 30},
+  "retries": {"max_safe_retries": 2},
+  "results": {"default_limit": 20, "max_limit": 100},
+  "web": {"host": "127.0.0.1", "port": 8765}
+}

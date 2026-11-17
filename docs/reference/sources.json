@@ -1,0 +1,71 @@
+{
+  "base_commit": "ece055af3eb1f68537e35771470d6cbb09029807",
+  "pages": [
+    {
+      "id": "1572933",
+      "title": "MVP v1 — JobRadar",
+      "url": "https://arkadijgoncarov.atlassian.net/wiki/spaces/JOBRADAR/pages/1572933",
+      "version": 5
+    },
+    {
+      "id": "1769474",
+      "title": "Состав и ограничения v0.1",
+      "url": "https://arkadijgoncarov.atlassian.net/wiki/spaces/JOBRADAR/pages/1769474",
+      "version": 9
+    },
+    {
+      "id": "2424833",
+      "title": "Architecture — архитектура JobRadar MVP",
+      "url": "https://arkadijgoncarov.atlassian.net/wiki/spaces/JOBRADAR/pages/2424833",
+      "version": 1
+    },
+    {
+      "id": "1605696",
+      "title": "Database — логическая модель данных JobRadar",
+      "url": "https://arkadijgoncarov.atlassian.net/wiki/spaces/JOBRADAR/pages/1605696",
+      "version": 9
+    },
+    {
+      "id": "1605719",
+      "title": "Database — пользователи, профили и контексты",
+      "url": "https://arkadijgoncarov.atlassian.net/wiki/spaces/JOBRADAR/pages/1605719",
+      "version": 4
+    },
+    {
+      "id": "1802256",
+      "title": "Database — сообщения и поисковые задачи",
+      "url": "https://arkadijgoncarov.atlassian.net/wiki/spaces/JOBRADAR/pages/1802256",
+      "version": 3
+    },
+    {
+      "id": "1802274",
+      "title": "Database — вакансии, карточки и оценки",
+      "url": "https://arkadijgoncarov.atlassian.net/wiki/spaces/JOBRADAR/pages/1802274",
+      "version": 6
+    },
+    {
+      "id": "2359317",
+      "title": "Tool Calling — реестр команд v0.1 и правила доступа",
+      "url": "https://arkadijgoncarov.atlassian.net/wiki/spaces/JOBRADAR/pages/2359317",
+      "version": 8
+    },
+    {
+      "id": "2490371",
+      "title": "Tool Calling — полные JSON Schema 11 команд",
+      "url": "https://arkadijgoncarov.atlassian.net/wiki/spaces/JOBRADAR/pages/2490371",
+      "version": 1
+    },
+    {
+      "id": "2293817",
+      "title": "System Prompts — базовая версия 1.0 для JobRadar",
+      "url": "https://arkadijgoncarov.atlassian.net/wiki/spaces/JOBRADAR/pages/2293817",
+      "version": 1
+    },
+    {
+      "id": "2424869",
+      "title": "Architecture — задачи, источники и сбои",
+      "url": "https://arkadijgoncarov.atlassian.net/wiki/spaces/JOBRADAR/pages/2424869",
+      "version": 4
+    }
+  ]
+}
