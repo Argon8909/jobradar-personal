@@ -62,6 +62,10 @@ def load_settings(path: str | Path) -> Settings:
         raise ValueError("results.default_limit cannot exceed results.max_limit")
     if values["web"]["port"] > 65535:
         raise ValueError("web.port must be at most 65535")
+    for section, key in (("llm", "max_tokens"), ("dialogue", "max_llm_calls")):
+        value = values[section].get(key)
+        if value is not None and (type(value) is not int or value <= 0):
+            raise ValueError(f"{section}.{key} must be a positive integer")
     if values["llm"]["provider"] != "deepseek":
         raise ValueError("Only DeepSeek is supported in v0.1")
     temperature = values["llm"]["temperature"]

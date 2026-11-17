@@ -18,13 +18,14 @@ class ProfileManager:
     intent or consent before passing authorized=True to a mutating operation.
     """
 
-    def __init__(self, database: Database, user_id: int, session_id: int):
+    def __init__(self, database: Database, user_id: int, session_id: int, *, expected_context_id=_UNSET):
         for value in (user_id, session_id):
             if type(value) is not int or value <= 0:
                 raise ProfileError("VALIDATION_ERROR", "Invalid user or session identifier")
         self.database = database
         self.user_id = user_id
         self.session_id = session_id
+        self.expected_context_id = expected_context_id
 
     @classmethod
     def start_session(cls, database: Database, user_id: int = 1):
@@ -42,6 +43,8 @@ class ProfileManager:
         row = repository.session(db, self.session_id)
         if row is None or row["user_id"] != self.user_id:
             raise ProfileError("ACCESS_DENIED", "Session is unavailable")
+        if self.expected_context_id is not _UNSET and row["active_context_id"] != self.expected_context_id:
+            raise ProfileError("REVISION_CONFLICT", "Active context changed")
         if row["active_context_id"] is not None:
             self._owned_context(db, row["active_context_id"])
         return row

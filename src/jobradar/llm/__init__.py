@@ -1,1 +1,1 @@
-"""Shared DeepSeek transport boundary; implementation follows in a later stage."""
+"""DeepSeek transport with safe retries and secret handling."""

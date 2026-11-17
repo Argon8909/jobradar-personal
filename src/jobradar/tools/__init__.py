@@ -1,1 +1,1 @@
-"""Tool registry and dispatcher boundary for the 11 approved commands."""
+"""Approved definitions, handler registry and permission-checking dispatcher."""
