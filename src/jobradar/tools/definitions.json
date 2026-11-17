@@ -1,0 +1,736 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "list_profiles",
+      "description": "Получить краткий список профессиональных профилей пользователя и их контекстов.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "create_profile",
+      "description": "Создать профессиональный профиль и первый контекст автоматически; только после решения пользователя.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "profession": {
+            "type": "string",
+            "description": "Название профессии"
+          },
+          "profile_data": {
+            "type": "object",
+            "properties": {
+              "specializations": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "experience": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "domain": {
+                      "type": "string",
+                      "description": "Область опыта"
+                    },
+                    "years": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "domain"
+                  ]
+                }
+              },
+              "competencies": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "qualifications": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "description": "Тип квалификации"
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "Наименование"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "name"
+                  ]
+                }
+              },
+              "education": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "level": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "field": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "qualification": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "institution": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "year": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additional_attributes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "description": "Ключ snake_case"
+                    },
+                    "value": {
+                      "type": [
+                        "string",
+                        "number",
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "description": {
+                      "type": "string",
+                      "description": "Пояснение"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "key",
+                    "value",
+                    "description"
+                  ]
+                }
+              },
+              "notes": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "profession"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "switch_context",
+      "description": "Переключить активный поисковый контекст по идентификатору.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "context_id": {
+            "type": "integer",
+            "description": "ID доступного контекста"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "context_id"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "return_to_general",
+      "description": "Вернуться из активного контекста в общий диалог.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "update_profile",
+      "description": "Обновить только явно изменяемые профессиональные сведения активного профиля; не заменять весь объект.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "changes": {
+            "type": "object",
+            "properties": {
+              "profession": {
+                "type": "string",
+                "description": "Основная профессия"
+              },
+              "specializations": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "experience": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "domain": {
+                      "type": "string",
+                      "description": "Область опыта"
+                    },
+                    "years": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "domain"
+                  ]
+                }
+              },
+              "competencies": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "qualifications": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "description": "Тип квалификации"
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "Наименование"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "name"
+                  ]
+                }
+              },
+              "education": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "level": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "field": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "qualification": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "institution": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "year": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additional_attributes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "description": "Ключ snake_case"
+                    },
+                    "value": {
+                      "type": [
+                        "string",
+                        "number",
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "description": {
+                      "type": "string",
+                      "description": "Пояснение"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "key",
+                    "value",
+                    "description"
+                  ]
+                }
+              },
+              "notes": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "changes"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_contexts",
+      "description": "Получить поисковые контексты текущего активного профиля.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "create_context",
+      "description": "Создать дополнительный поисковый контекст у активного профиля.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Название контекста"
+          },
+          "criteria": {
+            "type": "object",
+            "properties": {
+              "target_roles": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "locations": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "work_formats": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "remote",
+                    "hybrid",
+                    "office"
+                  ]
+                }
+              },
+              "salary": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "min": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "minimum": 0
+                      },
+                      "currency": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "pattern": "^[A-Z]{3}$"
+                      },
+                      "strict": {
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "experience_level": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "preferences": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "attribute": {
+                      "type": "string",
+                      "description": "Имя условия"
+                    },
+                    "operator": {
+                      "type": "string",
+                      "description": "Оператор условия"
+                    },
+                    "value": {
+                      "type": [
+                        "string",
+                        "number",
+                        "boolean"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "attribute",
+                    "operator",
+                    "value"
+                  ]
+                }
+              },
+              "restrictions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "attribute": {
+                      "type": "string",
+                      "description": "Имя условия"
+                    },
+                    "operator": {
+                      "type": "string",
+                      "description": "Оператор условия"
+                    },
+                    "value": {
+                      "type": [
+                        "string",
+                        "number",
+                        "boolean"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "attribute",
+                    "operator",
+                    "value"
+                  ]
+                }
+              },
+              "notes": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "update_context",
+      "description": "Частично обновить критерии активного поискового контекста, сохраняя остальные значения.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "changes": {
+            "type": "object",
+            "properties": {
+              "target_roles": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "locations": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "work_formats": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "remote",
+                    "hybrid",
+                    "office"
+                  ]
+                }
+              },
+              "salary": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "min": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "minimum": 0
+                      },
+                      "currency": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "pattern": "^[A-Z]{3}$"
+                      },
+                      "strict": {
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "experience_level": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "preferences": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "attribute": {
+                      "type": "string",
+                      "description": "Имя условия"
+                    },
+                    "operator": {
+                      "type": "string",
+                      "description": "Оператор условия"
+                    },
+                    "value": {
+                      "type": [
+                        "string",
+                        "number",
+                        "boolean"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "attribute",
+                    "operator",
+                    "value"
+                  ]
+                }
+              },
+              "restrictions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "attribute": {
+                      "type": "string",
+                      "description": "Имя условия"
+                    },
+                    "operator": {
+                      "type": "string",
+                      "description": "Оператор условия"
+                    },
+                    "value": {
+                      "type": [
+                        "string",
+                        "number",
+                        "boolean"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "attribute",
+                    "operator",
+                    "value"
+                  ]
+                }
+              },
+              "notes": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "changes"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search_vacancies",
+      "description": "Запустить поиск по активному контексту; request только разовое уточнение, не изменение сохранённых критериев.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "type": "string",
+            "description": "Необязательное разовое уточнение поиска"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_search_results",
+      "description": "Получить результаты поисковой задачи; без task_id — последний поиск текущего контекста.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "description": "По умолчанию 20"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_vacancy_details",
+      "description": "Получить сведения о вакансии, доступной в активном контексте.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "vacancy_id": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "vacancy_id"
+        ]
+      }
+    }
+  }
+]

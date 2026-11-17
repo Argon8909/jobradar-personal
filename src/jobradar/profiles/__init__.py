@@ -1,1 +1,6 @@
-"""Profile and context service boundary; business operations follow in stage 2."""
+"""Profile/context domain service with session ownership checks."""
+
+from .contracts import ProfileError
+from .manager import ProfileManager
+
+__all__ = ["ProfileError", "ProfileManager"]
