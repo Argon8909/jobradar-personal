@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Диагностика — JobRadar</title><link rel="stylesheet" href="{{ url_for('static', filename='diagnostics.css') }}">
+<script defer src="{{ url_for('static', filename='diagnostics.js') }}"></script></head>
+<body><header><a href="/">← Вернуться к чату</a><h1>Диагностика поисков</h1><p id="context"></p></header>
+<div class="toolbar"><label>Поиск <select id="tasks" aria-label="Выберите поиск"></select></label><button id="reload">Обновить</button><button id="export" disabled>Скачать диагностический JSON</button><label><input type="checkbox" id="auto" checked> Автообновление</label></div>
+<p id="error" role="alert"></p><p id="status" role="status"></p>
+<p class="notice">Локальная техническая панель. Ответы LLM могут содержать данные профиля и вакансий. Экспорт передаётся только при нажатии «Скачать»; проверьте содержимое перед отправкой другому человеку.</p>
+<section><h2>Итог и счётчики</h2><div id="summary"></div></section>
+<section><h2>План поиска и география</h2><pre id="plan"></pre></section>
+<section><h2>События и проверки</h2><div class="toolbar"><label>Уровень <select id="severity"><option value="">Все</option><option>error</option><option>warning</option><option>info</option></select></label><label>Фильтр по этапу, коду или вакансии <input id="filter" type="search"></label></div><div id="issues"></div></section>
+<section><h2>Вызовы LLM</h2><p>Включает исходную попытку и исправление. Успешные ответы по умолчанию представлены метаданными; тела ошибок и ответов на исправление сохраняются. У старых поисков ответов может не быть.</p><div id="calls"></div></section>
+<section><h2>Вакансии без актуальной оценки</h2><div id="unassessed"></div></section>
+</body></html>

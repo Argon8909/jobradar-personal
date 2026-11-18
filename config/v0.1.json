@@ -8,5 +8,6 @@
   "source": {"page_timeout_seconds": 30, "content_timeout_seconds": 15},
   "retries": {"max_safe_retries": 2, "max_structural_repairs": 1},
   "results": {"default_limit": 20, "max_limit": 100},
+  "diagnostics": {"capture_llm": "errors", "retention_days": 7, "max_response_chars": 65536, "max_file_bytes": 5242880},
   "web": {"host": "127.0.0.1", "port": 8765}
 }

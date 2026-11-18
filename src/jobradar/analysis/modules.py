@@ -3,6 +3,7 @@
 import copy
 import json
 import re
+import time
 
 from jsonschema import Draft202012Validator
 
@@ -14,13 +15,20 @@ from jobradar.search.budget import SearchStop
 
 
 class StructuredLLM:
-    def __init__(self, client, settings, budget, observer=None):
+    def __init__(self, client, settings, budget, observer=None, recorder=None):
         self.client, self.settings, self.budget = client, settings, budget
         self.observer = observer
+        self.recorder = recorder
 
-    def warn(self, code, stage, message, *, path=None):
+    def _record(self, prompt_name, messages, schema, response, attempt, start, error=None):
+        if self.recorder:
+            self.recorder.llm_call(prompt_name=prompt_name,messages=messages,schema=schema,
+                model=self.settings.values["llm"]["model"],response=response,attempt=attempt,
+                elapsed_ms=round((time.monotonic()-start)*1000),error=error.diagnostic() if error else None)
+
+    def warn(self, code, stage, message, *, path=None, details=None):
         if self.observer:
-            self.observer(AnalysisError(code,stage,message,path=path).diagnostic("warning"))
+            self.observer(AnalysisError(code,stage,message,path=path,details=details).diagnostic("warning"))
 
     def call(self, prompt_name, data, schema, *, validation_schema=None, check=None):
         prompt = (self.settings.prompts_dir / (prompt_name + ".md")).read_text(encoding="utf-8")
@@ -36,28 +44,35 @@ class StructuredLLM:
                 self.observer({**error.diagnostic("warning"),"code":"REPAIR_REQUESTED","validation_code":error.code,
                                "message":"Запрошено однократное исправление структуры ответа модели."})
             try:
+                start = time.monotonic()
                 response = self.client.complete(messages,json_mode=True,deadline=self.budget.deadline)
             except LLMError as exc:
-                raise AnalysisError(exc.code,stage,str(exc)) from None
+                error = AnalysisError(exc.code,stage,str(exc))
+                self._record(prompt_name,messages,schema,{"content":getattr(exc,"response_content",None)},attempt,start,error)
+                raise error from None
             content = response.get("content")
             try:
                 result = json.loads(content)
                 json.dumps(result,allow_nan=False)
-            except (ValueError,TypeError):
-                error = AnalysisError("LLM_JSON_INVALID",stage,"Ответ модели не является корректным JSON.",path="/",rule="json")
+            except (ValueError,TypeError) as exc:
+                details = {key:getattr(exc,key) for key in ("lineno","colno","pos","msg") if hasattr(exc,key)}
+                error = AnalysisError("LLM_JSON_INVALID",stage,"Ответ модели не является корректным JSON.",path="/",rule="json",details=details)
             else:
                 invalid = next(Draft202012Validator(validation_schema or schema).iter_errors(result),None)
                 if invalid:
                     # Validator messages can contain private source/model data.
                     path = "/" + "/".join(str(part).replace("~","~0").replace("/","~1") for part in invalid.absolute_path)
-                    error = AnalysisError("LLM_SCHEMA_INVALID",stage,"Ответ модели нарушает схему данных.",path=path,rule=invalid.validator)
+                    error = AnalysisError("LLM_SCHEMA_INVALID",stage,"Ответ модели нарушает схему данных.",path=path,rule=invalid.validator,
+                        details={"explanation":str(invalid.message)[:3000],"expected":invalid.validator_value})
                 else:
                     try:
                         if check:
                             check(result)
+                        self._record(prompt_name,messages,schema,response,attempt,start)
                         return result
                     except AnalysisError as exc:
                         error = exc
+            self._record(prompt_name,messages,schema,response,attempt,start,error)
             if attempt == repairs:
                 raise error
             messages += [{"role":"assistant","content":content if isinstance(content,str) else ""},
@@ -75,12 +90,27 @@ class SearchPlanner:
             "request":request,"sources":list(sources),"supported_filters":["areas","work_formats"]},PLANNER_OUTPUT)
         plan = output["search_queries"]
         criteria = state["context"]["criteria"]
+        resolutions = {item["input"].strip().casefold():item for item in output.get("resolved_locations",[])}
+        broad = re.compile(r"ближн\w*\s+зарубеж\w*|ближайш\w*\s+зарубеж\w*|постсовет\w*|\bснг\b|\bевроп\w*\b|\bзарубеж\w*\b",re.I)
         for query in plan["queries"]:
+            if broad.search(query["text"]):
+                raise SearchStop("LOCATION_CLARIFICATION","Уточните страны поиска: географическую группу нужно преобразовать в регионы, а не использовать как ключевые слова вакансии.")
             if query["source"] not in sources:
                 raise LLMError("План поиска содержит неподключённый источник.")
             query.setdefault("filters",{})
             # The planner cannot silently discard the user's explicit hard filters.
             locations = criteria.get("locations") or query.get("areas",[])
+            resolved = []
+            for name in locations:
+                if broad.search(name):
+                    item = resolutions.get(name.strip().casefold())
+                    if not item or any(broad.search(area) for area in item["areas"]):
+                        raise SearchStop("LOCATION_CLARIFICATION","Какие страны включить в поиск за рубежом? Например, Беларусь, Казахстан, Армению или другие — укажите подходящие вам.")
+                    resolved.extend(item["areas"])
+                    self.llm.warn("LOCATION_RESOLVED","search_planner",f"География «{name}»: {', '.join(item['areas'])}. {item['explanation']}")
+                else:
+                    resolved.append(name)
+            locations = list(dict.fromkeys(resolved))
             remote = {"удалённо","удаленно","удалёнка","удаленка","remote","удалённая работа","удаленная работа"}
             query["areas"] = [name for name in locations if name.strip().casefold() not in remote]
             if len(query["areas"]) != len(locations):
@@ -115,7 +145,7 @@ class VacancyAnalyzer:
                 match = re.search(r"\s+".join(re.escape(word) for word in tag["evidence"].split()),vacancy["description"])
             if not match:
                 self.llm.warn("TAG_INVALID" if invalid else "TAG_EVIDENCE_MISSING","tag_validation",
-                              "Тег пропущен: неверная структура или нет подтверждённой цитаты в объявлении.",path=f"/tags/{index}")
+                              "Тег пропущен: неверная структура или нет подтверждённой цитаты в объявлении.",path=f"/tags/{index}",details={"tag":tag})
                 result["card"]["structured_data"].setdefault("uncertainties",[]).append("Один из тегов не прошёл проверку; карточка и оценка сохранены без него.")
                 continue
             valid.append({**tag,"evidence":match.group(0)})
@@ -158,6 +188,7 @@ class TagResolver:
                     uncertainties.append("Сопоставление одного из тегов не завершено.")
                     continue
                 if result["decision"] == "ambiguous":
+                    self.llm.warn("TAG_AMBIGUOUS","tag_resolution","Тег не сопоставлен однозначно.",details={"tag":tag,"resolution":result})
                     uncertainties.append("Неоднозначное соответствие тега: " + tag["name"])
                     continue
                 if result["decision"] == "use_existing":

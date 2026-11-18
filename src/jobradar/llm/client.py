@@ -9,10 +9,11 @@ from jobradar.diagnostics import record
 
 
 class LLMError(RuntimeError):
-    def __init__(self, message="Не удалось получить ответ DeepSeek.", *, retryable=False, code="LLM_ERROR"):
+    def __init__(self, message="Не удалось получить ответ DeepSeek.", *, retryable=False, code="LLM_ERROR", response_content=None):
         super().__init__(message)
         self.retryable = retryable
         self.code = code
+        self.response_content = response_content
 
 
 def read_api_key(env_path: Path) -> str:
@@ -61,7 +62,7 @@ class DeepSeekClient:
                     result = json.load(response)
                 choice = result["choices"][0]
                 if choice.get("finish_reason") == "length":
-                    raise LLMError("Ответ DeepSeek обрезан; действие не выполнено.",code="LLM_TRUNCATED")
+                    raise LLMError("Ответ DeepSeek обрезан; действие не выполнено.",code="LLM_TRUNCATED",response_content=choice.get("message",{}).get("content"))
                 message = choice["message"]
                 if not isinstance(message, dict) or message.get("role") != "assistant":
                     raise ValueError()
@@ -77,7 +78,7 @@ class DeepSeekClient:
                 safe_usage = {key:value for key,value in usage.items() if key in ("prompt_tokens","completion_tokens","total_tokens")
                               and type(value) is int and value >= 0} if isinstance(usage,dict) else {}
                 record("llm","generation_completed",attempt=attempt+1,**safe_usage)
-                return {"role": "assistant", "content": content,
+                return {"role": "assistant", "content": content,"finish_reason":choice.get("finish_reason"),"usage":safe_usage,
                         **({"tool_calls": calls} if calls else {})}
             except error.HTTPError as exc:
                 retryable = exc.code == 429 or 500 <= exc.code <= 599

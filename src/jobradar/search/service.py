@@ -1,6 +1,7 @@
 """Synchronous task pipeline; event yields do not require a worker or queue."""
 
 import re
+import json
 import sqlite3
 
 from jobradar.analysis.modules import SearchPlanner, StructuredLLM, TagResolver, VacancyAnalyzer
@@ -37,18 +38,22 @@ class SearchService:
         with self.database.transaction() as db:
             manager._active(db)
             task_id = tasks.create_task(db,state,goal,target)
-        trace = TaskTrace(self.database,task_id)
-        structured = StructuredLLM(self.client,self.settings,budget,observer=trace.issue)
+        trace = TaskTrace(self.database,task_id,self.settings)
+        trace.prune()
+        structured = StructuredLLM(self.client,self.settings,budget,observer=trace.issue,recorder=trace)
         planner, analyzer, resolver = SearchPlanner(structured), VacancyAnalyzer(structured), TagResolver(self.database,structured)
         processed, new_analyses, collected = set(), 0, 0
         attempted = set()
         record("search","task_started",task_id=task_id,context_id=state["active_context_id"])
         reasons = []
         iterator = None
+        clarification = None
         try:
             yield {"event":"search_started","data":{"task_id":task_id,"message":"Поиск запущен"}}
             output = planner.plan(state,request,self.sources)
             plan = output["search_queries"]
+            trace.data["search_plan"] = plan
+            trace.save()
             target = output["target_count"] or target
             with self.database.transaction() as db:
                 tasks.save_plan(db,task_id,plan)
@@ -206,6 +211,10 @@ class SearchService:
                 budget.check()
                 reasons.append("RESULTS_EXHAUSTED: цель по количеству не достигнута")
         except (SearchStop,SourceError) as exc:
+            if exc.code == "LOCATION_CLARIFICATION":
+                clarification = str(exc)
+            elif exc.code == "AREA_UNSUPPORTED":
+                clarification = "Уточните конкретные страны или города поиска: один из указанных регионов не удалось выбрать на HH.ru."
             reasons.append(exc.code + ": " + str(exc))
             trace.issue({"code":exc.code,"stage":"search","message":str(exc),"severity":"error"})
         except LLMError as exc:
@@ -232,6 +241,7 @@ class SearchService:
         trace.data["metrics"]["analysis_failed"] = trace.data["metrics"]["analysis_attempts"] - trace.data["metrics"]["analysis_succeeded"]
         trace.save()
         attach_diagnostics(report,trace.data)
+        report["clarification"] = clarification
         report["summary"] = self.render_report(report)
         record("search","task_finished",task_id=task_id,state=report["status"],partial=report["is_partial"],
                found=report["counts"]["found_count"],evaluated=len(processed),llm_calls=budget.calls,
@@ -249,15 +259,10 @@ class SearchService:
         if report["status"] == "failed":
             header += " Поиск завершился с ошибкой."
         lines = [header]
-        if report["stop_reason"]:
-            lines.append("Причина: " + "; ".join(part.partition(": ")[2] or part for part in report["stop_reason"].split("; ")))
-        if report.get("filtered_count"):
-            lines.append(f"Не прошли обязательные условия: {report['filtered_count']}.")
-        if report.get("unassessed_count"):
-            lines.append(f"Без актуальной оценки: {report['unassessed_count']}. Причины и список доступны в разделе «Диагностика последнего поиска».")
-        trace = report.get("diagnostics")
-        if trace and trace["metrics"]["source_skipped"]:
-            lines.append(f"Не удалось прочитать на источнике: {trace['metrics']['source_skipped']}.")
+        if report.get("clarification"):
+            lines.append(report["clarification"])
+        if report.get("unassessed_count") or report["status"] == "failed":
+            lines.append("Подробности доступны в отдельной панели диагностики.")
         for index,item in enumerate(report["vacancies"],1):
             assessment = item["assessment"] or {}
             decision = assessment.get('decision','Не оценена')
@@ -274,12 +279,16 @@ class SearchService:
     def diagnostics(self, manager, state, task_id=None):
         with self.database.transaction() as db:
             manager._active(db)
-            result = tasks.results(db,state,task_id,self.settings.values["results"]["max_limit"])
+            current = tasks.task(db,state["active_context_id"],task_id)
+            result = tasks.results(db,state,current["id"],self.settings.values["results"]["max_limit"])
+            result["search_plan"] = json.loads(current["search_queries"]) if current["search_queries"] else None
+            result["created_at"] = current["created_at"]
+            result["completed_at"] = current["completed_at"]
         return attach_diagnostics(result,TaskTrace.load(self.database,result["task_id"]))
 
     def _refresh_assessments(self, manager, state, ids, trace=None):
         budget = self.budget_factory(self.settings)
-        analyzer = VacancyAnalyzer(StructuredLLM(self.client,self.settings,budget,observer=trace.issue if trace else None))
+        analyzer = VacancyAnalyzer(StructuredLLM(self.client,self.settings,budget,observer=trace.issue if trace else None,recorder=trace))
         warnings = []
         for index,vacancy_id in enumerate(ids):
             if trace:
@@ -324,7 +333,7 @@ class SearchService:
             task = tasks.task(db,state["active_context_id"],arguments.get("task_id"))
             ids = [row[0] for row in db.execute("SELECT vacancy_id FROM task_vacancies WHERE task_id=? ORDER BY vacancy_id LIMIT ?",
                                                (task["id"],self.settings.values["search"]["max_source_vacancies"]))]
-        trace = TaskTrace.existing(self.database,task["id"])
+        trace = TaskTrace.existing(self.database,task["id"],self.settings)
         warnings = yield from self._refresh_assessments(manager,state,ids,trace)
         with self.database.transaction() as db:
             result = tasks.results(db,state,task["id"],limit)
@@ -338,7 +347,7 @@ class SearchService:
             tasks.details(db,state,arguments["vacancy_id"])
             task = db.execute("SELECT st.id FROM search_tasks st JOIN task_vacancies tv ON tv.task_id=st.id WHERE st.context_id=? AND tv.vacancy_id=? ORDER BY st.id DESC LIMIT 1",
                               (state["active_context_id"],arguments["vacancy_id"])).fetchone()
-        trace = TaskTrace.existing(self.database,task["id"]) if task else None
+        trace = TaskTrace.existing(self.database,task["id"],self.settings) if task else None
         warnings = yield from self._refresh_assessments(manager,state,[arguments["vacancy_id"]],trace)
         with self.database.transaction() as db:
             result = tasks.details(db,state,arguments["vacancy_id"])

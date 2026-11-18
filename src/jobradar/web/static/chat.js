@@ -28,7 +28,9 @@ async function sendMessage(text) {
     if (event.event === "search_progress") byId("status").textContent = `Поиск: получено ${data.collected_count}, оценено ${data.evaluated_count}`;
     if (event.event === "search_finished") byId("status").textContent = data.message;
     if (event.event === "assessment_progress") byId("status").textContent = data.message;
-    if (["source_action_required", "source_resumed", "source_warning"].includes(event.event)) byId("status").textContent = data.message;
+    if (event.event === "source_action_required") byId("status").textContent = "Откройте окно HH.ru и завершите проверку или вход. Поиск ожидает вашего действия.";
+    if (event.event === "source_warning") byId("status").textContent = "Поиск продолжается…";
+    if (event.event === "source_resumed") byId("status").textContent = "Продолжаем поиск…";
     if (event.event === "answer") {
       completed = true;
       if (data.error) throw new Error(data.answer);
@@ -101,35 +103,10 @@ function profilesView(profiles) {
     container.append(group);
   }
 }
-function diagnosticsView(report) {
-  const panel = byId("search-diagnostics"), body = byId("diagnostics-body");
-  body.replaceChildren(); panel.hidden = !report;
-  if (!report) return;
-  byId("diagnostics-title").textContent = `Диагностика последнего поиска #${report.task_id}: без оценки ${report.unassessed_count}`;
-  function line(value) { const p = document.createElement("p"); p.textContent = value; body.append(p); }
-  line(`Найдено: ${report.counts.found_count}. Актуальных оценок: ${report.counts.evaluated_count}.`);
-  const trace = report.diagnostics;
-  if (trace) {
-    const m = trace.metrics;
-    line(`Новый анализ: попыток ${m.analysis_attempts}, успешно ${m.analysis_succeeded}, ошибок ${m.analysis_failed}. Не прочитано на сайте: ${m.source_skipped}. Предупреждений по тегам: ${m.tag_warnings}.`);
-    const reasons = [...new Set(trace.issues.filter(i => i.severity === "error").map(i => `${i.code}: ${i.message}${i.path ? ` (${i.path})` : ""}`))];
-    reasons.forEach(line);
-  } else line("Для этого поиска подробная диагностика не сохранялась.");
-  if (report.stop_reason) line(`Причина завершения: ${report.stop_reason}`);
-  for (const item of report.unassessed) {
-    const p = document.createElement("p"), link = document.createElement("a");
-    // Stored source links are still untrusted.
-    if (/^https?:\/\//i.test(item.url || "")) {
-      link.href = item.url; link.textContent = item.title; link.target = "_blank"; link.rel = "noopener noreferrer"; p.append(link);
-    } else p.append(document.createTextNode(item.title));
-    p.append(document.createTextNode(` — ${item.reason}${item.error_code ? ` [${item.error_code}]` : ""}${item.path ? ` ${item.path}` : ""}`)); body.append(p);
-  }
-}
 async function refresh() {
   const data = await api("/api/state");
   csrf = data.csrf_token;
   profilesView(data.profiles);
-  diagnosticsView(data.search_diagnostics);
   byId("context-title").textContent = data.state.profession || "Общий диалог";
   byId("context-subtitle").textContent = data.state.context_name || "Обсудим ваш опыт и подходящую работу";
   messages.replaceChildren(...data.history.messages.map(messageNode));

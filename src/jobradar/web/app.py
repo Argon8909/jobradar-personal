@@ -80,6 +80,19 @@ def create_app(database, settings, *, secret_key=None, client_factory=None):
     def home():
         return render_template("index.html")
 
+    @app.get("/diagnostics")
+    def diagnostics_page():
+        return render_template("diagnostics.html")
+
+    @app.get("/api/search-diagnostics/tasks")
+    def diagnostic_tasks():
+        service = orchestrator()
+        active = service.agent.manager.get_state()
+        with database.connection() as db:
+            rows = db.execute("SELECT id,state,created_at,completed_at FROM search_tasks WHERE context_id=? ORDER BY id DESC LIMIT 100",
+                              (active["active_context_id"],)).fetchall()
+        return jsonify(tasks=[dict(row) for row in rows],context_name=active["context"]["name"] if active["context"] else None)
+
     @app.get("/api/state")
     def state():
         service = orchestrator()
@@ -90,7 +103,6 @@ def create_app(database, settings, *, secret_key=None, client_factory=None):
                        "profession":active["profile"]["profile_data"].get("profession") if active["profile"] else None,
                        "context_name":active["context"]["name"] if active["context"] else None},
                 profiles=service.agent.manager.list_profiles()["profiles"],
-                search_diagnostics=service.agent.dispatcher.search_diagnostics(active),
                 history=service.agent.history.public_page(), csrf_token=session["csrf"],
             )
 
@@ -100,12 +112,11 @@ def create_app(database, settings, *, secret_key=None, client_factory=None):
         if raw is not None and (not raw.isdecimal() or not 0 < int(raw) <= 2**63 - 1):
             return jsonify(error={"code":"VALIDATION_ERROR","message":"Некорректный номер поиска."}),400
         service = orchestrator()
-        with service.lock:
-            try:
-                result = service.agent.dispatcher.search_diagnostics(service.agent.manager.get_state(),int(raw) if raw else None)
-            except ProfileError:
-                return jsonify(error={"code":"ACCESS_DENIED","message":"Поиск недоступен в активном контексте."}),403
-            return jsonify(result)
+        try:
+            result = service.agent.dispatcher.search_diagnostics(service.agent.manager.get_state(),int(raw) if raw else None)
+        except ProfileError:
+            return jsonify(error={"code":"ACCESS_DENIED","message":"Поиск недоступен в активном контексте."}),403
+        return jsonify(result)
 
     @app.get("/api/history")
     def history():

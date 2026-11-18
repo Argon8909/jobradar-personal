@@ -92,7 +92,8 @@ class StreamingSearchTests(unittest.TestCase):
         self.llm.dialogue.responses += [intent(explain_search=True)]
         response = self.client.post("/api/chat",json={"message":"Почему так много не проанализировано?"},headers={"X-JobRadar-CSRF":self.token})
         answer_text = response.get_json()["answer"]
-        self.assertIn("Попыток нового анализа: 1",answer_text)
+        self.assertIn("панели диагностики",answer_text)
+        self.assertNotIn("Попыток нового анализа",answer_text)
         self.assertNotIn("Подтверждаете",answer_text)
         self.assertEqual(len(self.source.requests),before)
         self.assertEqual(self.llm.dialogue.responses,[])
@@ -107,6 +108,35 @@ class StreamingSearchTests(unittest.TestCase):
         self.manager.create_context("Другой",authorized=True)
         self.assertEqual(self.client.get(f"/api/search-diagnostics?task_id={report['task_id']}").status_code,403)
         self.assertIsNone(self.client.get("/api/search-diagnostics").get_json())
+
+    def test_diagnostics_can_be_read_while_chat_lock_is_held_and_do_not_leak_into_state(self):
+        import threading
+        response=self.request();iterator=iter(response.response)
+        next(iterator);next(iterator)
+        cookie=self.client.get_cookie("jobradar_v01")
+        result=[]
+        def read():
+            client=self.app.test_client();client.set_cookie("jobradar_v01",cookie.value)
+            result.append(client.get("/api/search-diagnostics").get_json())
+        thread=threading.Thread(target=read,daemon=True);thread.start();thread.join(2)
+        try:
+            self.assertFalse(thread.is_alive(),"Diagnostics must not wait for the chat lock")
+            self.assertEqual(result[0]["status"],"running")
+        finally:
+            response.close();thread.join(2)
+        self.assertNotIn("search_diagnostics",self.client.get("/api/state").get_json())
+
+    def test_task_picker_is_scoped_and_dialogue_model_does_not_receive_diagnostics(self):
+        response=self.request();response.get_data();response.close()
+        listed=self.client.get("/api/search-diagnostics/tasks").get_json()
+        self.assertEqual([row["id"] for row in listed["tasks"]],[1])
+        tool_messages=[json.loads(m["content"]) for request,kw in self.llm.dialogue.requests for m in request if m.get("role")=="tool"]
+        self.assertTrue(tool_messages)
+        for item in tool_messages:
+            for key in ("diagnostics","diagnostic_metrics","diagnostic_reasons","stop_reason","unassessed"):
+                self.assertNotIn(key,item.get("data",{}))
+        self.manager.create_context("Другой",authorized=True)
+        self.assertEqual(self.client.get("/api/search-diagnostics/tasks").get_json()["tasks"],[])
 
     def test_acceptance_two_profiles_contexts_feedback_search_and_restart(self):
         from jobradar.sources.base import RawVacancy
