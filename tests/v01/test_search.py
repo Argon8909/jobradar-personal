@@ -4,6 +4,7 @@ import copy
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from jobradar.events import collect
 from jobradar.profiles import ProfileError, ProfileManager
 from jobradar.search.budget import TaskBudget
 from jobradar.search.service import SearchService
-from jobradar.sources.base import RawVacancy, SourceError
+from jobradar.sources.base import RawVacancy, SourceError, SourceEvent
 from jobradar.storage import Database, search as tasks, vacancies
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -50,7 +51,7 @@ class FixtureLLM:
 
     def complete(self, messages, **kwargs):
         self.calls.append((messages,kwargs))
-        prompt, data = messages[0]["content"], json.loads(messages[-1]["content"])["input"]
+        prompt, data = messages[0]["content"], json.loads(messages[1]["content"])["input"]
         if "планирования" in prompt:
             query = "Водитель категория B" if data["profile"]["profession"] == "Водитель" else "Аналитик SQL"
             result = {"search_queries":{"version":1,"queries":[{"source":self.plan_source,"text":query,"filters":{}}]},"target_count":self.target}
@@ -78,7 +79,7 @@ class FixtureLLM:
         return {"role":"assistant","content":json.dumps(result,ensure_ascii=False)}
 
     def count(self, mode):
-        return sum(json.loads(messages[-1]["content"])["input"].get("mode") == mode for messages, kwargs in self.calls)
+        return sum(json.loads(messages[1]["content"])["input"].get("mode") == mode for messages, kwargs in self.calls)
 
 
 class SearchTests(unittest.TestCase):
@@ -207,14 +208,16 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(report["status"],"completed")
         self.assertEqual(report["vacancies"],[])
 
-    def test_invalid_extraction_preserves_other_saved_results(self):
+    def test_invalid_tag_does_not_discard_valid_card_and_assessment(self):
         self.client.target = 2; self.client.malformed_id = "101"
         self.source.items = [raw(),raw("101")]
         report = self.run_search()
-        self.assertTrue(report["is_partial"])
-        self.assertEqual(report["counts"],{"found_count":2,"evaluated_count":1})
+        self.assertFalse(report["is_partial"])
+        self.assertEqual(report["counts"],{"found_count":2,"evaluated_count":2})
+        self.assertEqual(report["diagnostics"]["metrics"]["tag_warnings"],1)
         with self.db.connection() as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM vacancy_cards").fetchone()[0],1)
+            self.assertEqual(db.execute("SELECT count(*) FROM vacancy_cards").fetchone()[0],2)
+            self.assertEqual(db.execute("SELECT count(*) FROM vacancy_tags").fetchone()[0],1)
             self.assertEqual(db.execute("SELECT count(*) FROM vacancies").fetchone()[0],2)
 
     def test_analysis_limit_keeps_partial_results(self):
@@ -222,6 +225,143 @@ class SearchTests(unittest.TestCase):
         report = self.run_search(service=self.service(max_new_analyses=1))
         self.assertIn("ANALYSIS_LIMIT",report["stop_reason"])
         self.assertEqual(report["counts"]["evaluated_count"],1)
+
+    def test_core_failure_is_separate_from_results_and_not_retried_on_duplicate(self):
+        self.client.target = 3
+        self.run_search()
+        with self.db.transaction() as db:
+            db.execute("DELETE FROM vacancy_tags")
+            db.execute("DELETE FROM vacancy_cards")
+        original = self.client.complete
+        def corrupt(messages,**kwargs):
+            response = original(messages,**kwargs)
+            if json.loads(messages[1]["content"])["input"].get("mode") == "extract_and_assess":
+                result = json.loads(response["content"])
+                result["assessment"]["reasoning"] = 17
+                response["content"] = json.dumps(result)
+            return response
+        with patch.object(self.client,"complete",side_effect=corrupt):
+            report = self.run_search()
+        self.assertEqual(report["vacancies"],[])
+        self.assertEqual(report["unassessed_count"],1)
+        item = report["unassessed"][0]
+        self.assertEqual((item["error_code"],item["path"]),("LLM_SCHEMA_INVALID","/assessment/reasoning"))
+        self.assertNotIn("Не оценена",report["summary"])
+        metrics = report["diagnostics"]["metrics"]
+        self.assertEqual((metrics["analysis_attempts"],metrics["analysis_failed"],metrics["repair_requests"],metrics["duplicate_skipped"]),(1,1,1,1))
+        with self.db.connection() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM vacancy_cards").fetchone()[0],0)
+        loaded = self.service().diagnostics(self.manager,self.manager.get_state())
+        self.assertEqual(loaded["unassessed"][0]["path"],"/assessment/reasoning")
+        diagnostic_file = self.db.path.parent / "search-diagnostics" / f"task-{report['task_id']}.json"
+        self.assertNotIn(raw().description,diagnostic_file.read_text())
+
+    def test_one_structural_repair_recovers_core_within_total_call_budget(self):
+        original = self.client.complete
+        broken = False
+        def corrupt_once(messages,**kwargs):
+            nonlocal broken
+            response = original(messages,**kwargs)
+            if json.loads(messages[1]["content"])["input"].get("mode") == "extract_and_assess" and not broken:
+                broken = True
+                response["content"] = '{"card":'
+            return response
+        with patch.object(self.client,"complete",side_effect=corrupt_once):
+            report = self.run_search()
+        self.assertEqual(report["counts"]["evaluated_count"],1)
+        self.assertEqual(report["diagnostics"]["metrics"]["repair_requests"],1)
+        self.assertEqual(self.client.count("extract_and_assess"),2)
+
+    def test_repair_cannot_exceed_task_llm_budget(self):
+        original = self.client.complete
+        def corrupt(messages,**kwargs):
+            response = original(messages,**kwargs)
+            if json.loads(messages[1]["content"])["input"].get("mode") == "extract_and_assess":
+                response["content"] = "bad JSON"
+            return response
+        with patch.object(self.client,"complete",side_effect=corrupt):
+            report = self.run_search(service=self.service(max_llm_calls=2))
+        self.assertIn("LLM_LIMIT",report["stop_reason"])
+        self.assertEqual(len(self.client.calls),2)
+        self.assertEqual(report["diagnostics"]["metrics"]["analysis_failed"],1)
+
+    def test_whitespace_only_evidence_difference_preserves_actual_source_quote(self):
+        original = self.client.complete
+        self.source.items = [raw(description="Нужен SQL. PostgreSQL\n  REST API")]
+        def spaced(messages,**kwargs):
+            response = original(messages,**kwargs)
+            result = json.loads(response["content"])
+            if "tags" in result:
+                result["tags"][0]["evidence"] = "PostgreSQL REST API"
+                response["content"] = json.dumps(result)
+            return response
+        with patch.object(self.client,"complete",side_effect=spaced):
+            report = self.run_search()
+        self.assertEqual(report["diagnostics"]["metrics"]["tag_warnings"],0)
+        with self.db.connection() as db:
+            self.assertEqual(db.execute("SELECT evidence FROM vacancy_tags").fetchone()[0],"PostgreSQL\n  REST API")
+
+    def test_invalid_resolver_id_does_not_destroy_second_card(self):
+        self.run_search(); self.client.target = 2
+        self.source.items = [raw("101","SQL и Postgres")]
+        original = self.client.complete
+        def wrong_id(messages,**kwargs):
+            response = original(messages,**kwargs)
+            if "сопоставления" in messages[0]["content"]:
+                response["content"] = json.dumps({"decision":"use_existing","tag_id":999999})
+            return response
+        with patch.object(self.client,"complete",side_effect=wrong_id):
+            report = self.run_search()
+        self.assertEqual(report["counts"]["evaluated_count"],2)
+        self.assertEqual(report["diagnostics"]["metrics"]["tag_warnings"],1)
+        with self.db.connection() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM vacancy_cards").fetchone()[0],2)
+            self.assertEqual(db.execute("SELECT count(*) FROM tag_aliases").fetchone()[0],0)
+
+    def test_exhausted_tag_resolution_budget_preserves_completed_core(self):
+        self.run_search(); self.client.target = 2
+        self.source.items = [raw("101","SQL и Postgres")]
+        report = self.run_search(service=self.service(max_llm_calls=2))
+        self.assertEqual(report["counts"]["evaluated_count"],2)
+        self.assertEqual(report["diagnostics"]["metrics"]["tag_warnings"],1)
+        self.assertEqual(report["diagnostics"]["metrics"]["analysis_succeeded"],1)
+
+    def test_read_reassessment_failure_keeps_processing_other_cards(self):
+        self.client.target = 2; self.source.items = [raw(),raw("101")]
+        report = self.run_search()
+        self.manager.update_context({"notes":"Изменились условия"},authorized=True)
+        original = self.client.complete
+        def failing(messages,**kwargs):
+            response = original(messages,**kwargs)
+            data = json.loads(messages[1]["content"])["input"]
+            if data.get("mode") == "assessment_only" and data["card"]["vacancy_id"] == 1:
+                response["content"] = "broken"
+            return response
+        with patch.object(self.client,"complete",side_effect=failing):
+            result = collect(self.service().get_results(self.manager,{},self.manager.get_state()))
+        self.assertEqual(result["counts"]["evaluated_count"],1)
+        self.assertEqual(result["unassessed_count"],1)
+        self.assertEqual(result["unassessed"][0]["error_code"],"LLM_JSON_INVALID")
+        self.assertEqual(result["diagnostics"]["metrics"]["reassessments"],2)
+
+    def test_unreadable_source_page_does_not_abort_following_vacancy(self):
+        self.client.target = 3
+        self.source.items = [SourceEvent("source_warning","VACANCY_UNREADABLE","Нет полного текста.","99","https://hh.ru/vacancy/99","source_extraction"),raw()]
+        iterator = self.service().search(self.manager,{},self.manager.get_state())
+        events = [next(iterator),next(iterator)]
+        report = collect(iterator)
+        self.assertEqual(report["counts"]["evaluated_count"],1)
+        self.assertEqual(report["diagnostics"]["metrics"]["source_skipped"],1)
+        self.assertIn("source_warning",[event["event"] for event in events])
+        self.assertTrue(report["is_partial"])
+
+    def test_legacy_remote_location_is_recovered_without_mutating_criteria(self):
+        self.manager.update_context({"locations":["удалённо"]},authorized=True)
+        state = self.manager.get_state()
+        self.run_search()
+        self.assertEqual(self.source.requests[0]["areas"],[])
+        self.assertEqual(self.source.requests[0]["filters"]["work_formats"],["remote"])
+        self.assertEqual(self.manager.get_state(),state)
 
     def test_source_limit_and_total_llm_limit(self):
         self.client.target = 3; self.source.items = [raw(),raw("101")]

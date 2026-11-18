@@ -90,8 +90,22 @@ def create_app(database, settings, *, secret_key=None, client_factory=None):
                        "profession":active["profile"]["profile_data"].get("profession") if active["profile"] else None,
                        "context_name":active["context"]["name"] if active["context"] else None},
                 profiles=service.agent.manager.list_profiles()["profiles"],
+                search_diagnostics=service.agent.dispatcher.search_diagnostics(active),
                 history=service.agent.history.public_page(), csrf_token=session["csrf"],
             )
+
+    @app.get("/api/search-diagnostics")
+    def search_diagnostics():
+        raw = request.args.get("task_id")
+        if raw is not None and (not raw.isdecimal() or not 0 < int(raw) <= 2**63 - 1):
+            return jsonify(error={"code":"VALIDATION_ERROR","message":"Некорректный номер поиска."}),400
+        service = orchestrator()
+        with service.lock:
+            try:
+                result = service.agent.dispatcher.search_diagnostics(service.agent.manager.get_state(),int(raw) if raw else None)
+            except ProfileError:
+                return jsonify(error={"code":"ACCESS_DENIED","message":"Поиск недоступен в активном контексте."}),403
+            return jsonify(result)
 
     @app.get("/api/history")
     def history():

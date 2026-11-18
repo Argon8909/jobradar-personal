@@ -5,6 +5,10 @@ import sys
 import tempfile
 import threading
 import unittest
+import json
+import time
+from contextlib import contextmanager
+from unittest.mock import patch
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright, expect
@@ -169,6 +173,106 @@ class BrowserChatTests(unittest.TestCase):
         expect(self.page.locator("#messages")).to_contain_text("найдено 1, оценено 1")
         expect(self.page.locator('#messages a[href="https://hh.ru/vacancy/100"]')).to_be_visible()
         self.screenshot("desktop-search.png")
+
+    def test_hh_jsonld_and_delayed_description_fallback(self):
+        from jobradar.sources.hh import extract, HHAdapter
+        adapter = HHAdapter(load_settings(ROOT/"config/v0.1.json"))
+        self.page.set_content('<h1>Аналитик</h1><script type="application/ld+json">{"@type":"WebSite"}</script>')
+        self.page.evaluate("setTimeout(() => {const el=document.createElement('div'); el.className='vacancy-description'; el.innerText='SQL\\nSQL\\nREST API'; document.body.append(el);}, 150)")
+        adapter._wait_content(self.page,time.monotonic()+5)
+        self.assertEqual(extract(self.page,"1").description.count("SQL"),2)
+        payload = {"@context":"https://schema.org","@graph":[{"@type":"JobPosting","title":"Системный аналитик",
+                   "hiringOrganization":{"name":"Компания"},"description":"<p>SQL</p><p>REST API &amp; JSON</p>"}]}
+        self.page.set_content('<script type="application/ld+json">'+json.dumps(payload)+'</script>')
+        adapter._wait_content(self.page,time.monotonic()+5)
+        vacancy = extract(self.page,"2")
+        self.assertEqual(vacancy.title,"Системный аналитик")
+        self.assertIn("REST API & JSON",vacancy.description)
+
+    def test_hh_manual_challenge_emits_status_and_resumes_after_user_action(self):
+        from jobradar.sources.hh import HHAdapter
+        from jobradar.events import collect
+        adapter = HHAdapter(load_settings(ROOT/"config/v0.1.json"))
+        cleared = False
+        def site(route):
+            route.fulfill(body='<h1>HH fixture</h1>' + ('' if cleared else '<input name="captcha">'),content_type="text/html")
+        self.page.route("https://hh.ru/**",site)
+        iterator = adapter._navigate(self.page,"https://hh.ru/search/vacancy",time.monotonic()+5)
+        event = next(iterator)
+        self.assertEqual((event.kind,event.code),("source_action_required","CAPTCHA"))
+        # Simulate a person completing a fixture, never solve a real CAPTCHA.
+        cleared = True
+        self.page.locator('input[name="captcha"]').evaluate("el => el.remove()")
+        self.assertEqual(next(iterator).kind,"source_resumed")
+        self.assertEqual(collect(iterator).status,200)
+
+    def test_hh_region_is_resolved_from_visible_controls_without_api(self):
+        from jobradar.sources.hh import HHAdapter
+        from jobradar.events import collect
+        adapter = HHAdapter(load_settings(ROOT/"config/v0.1.json"))
+        requests = []
+        def site(route):
+            requests.append(route.request.url)
+            route.fulfill(content_type="text/html; charset=utf-8",body='''<button data-qa="advanced-search-region-selectFromList" onclick="document.getElementById('regions').hidden=false">Регион</button>
+            <div id="regions" role="dialog" hidden><input type="text" aria-label="Поиск региона"><label><input type="checkbox" value="104">Челябинск</label></div>''')
+        self.context.route("https://hh.ru/**",site)
+        area = collect(adapter._area(self.context,"Челябинск",time.monotonic()+5))
+        self.assertEqual(area,"104")
+        self.assertEqual(requests,["https://hh.ru/search/vacancy/advanced"])
+
+    def test_hh_search_continues_after_unreadable_detail_page(self):
+        from jobradar.sources.hh import HHAdapter
+        from jobradar.sources.base import RawVacancy, SourceEvent
+        settings = load_settings(ROOT/"config/v0.1.json")
+        settings.values["source"]["content_timeout_seconds"] = 1
+        adapter = HHAdapter(settings)
+        def site(route):
+            path = route.request.url
+            body = ('<a href="https://hh.ru/vacancy/10">1</a><a href="https://hh.ru/vacancy/11">2</a>' if "/search/" in path else
+                    '<h1>Analyst</h1>' + ('<div data-qa="vacancy-description">SQL and REST API</div>' if path.endswith("/11") else ''))
+            route.fulfill(content_type="text/html; charset=utf-8",body=body)
+        self.context.route("https://hh.ru/**",site)
+        @contextmanager
+        def browser_context():
+            yield self.context
+        with patch.object(adapter,"_browser",browser_context):
+            items = list(adapter.search({"text":"analyst"},limit=2,deadline=time.monotonic()+10))
+        self.assertEqual(len(items),2)
+        self.assertIsInstance(items[0],SourceEvent)
+        self.assertEqual(items[0].code,"VACANCY_UNREADABLE")
+        self.assertIsInstance(items[1],RawVacancy)
+        self.assertEqual(items[1].external_id,"11")
+
+    def test_unassessed_diagnostics_are_separate_and_safe_to_render(self):
+        from jobradar.search.service import SearchService
+        from test_search import FixtureSource, raw
+        from test_search_stream import CombinedClient
+        service = next(iter(self.app.extensions["jobradar_orchestrators"].values()))
+        service.agent.manager.create_profile("Аналитик",authorized=True)
+        combined = CombinedClient()
+        combined.dialogue.responses += [intent([("search_vacancies",{})],evidence="Найди"),calls(("s1","search_vacancies",{})),answer("Готово")]
+        original = combined.complete
+        def invalid(messages,**kwargs):
+            response = original(messages,**kwargs)
+            try: data = json.loads(messages[1]["content"]).get("input",{})
+            except (ValueError,TypeError): data = {}
+            if data.get("mode") == "extract_and_assess":
+                result = json.loads(response["content"]); result["assessment"]["reasoning"] = 0
+                response["content"] = json.dumps(result)
+            return response
+        combined.complete = invalid
+        service.agent.client = combined
+        registry = service.agent.dispatcher.registry
+        for name in ("search_vacancies","get_search_results","get_vacancy_details"):
+            registry.handlers.pop(name)
+        SearchService(self.db,load_settings(ROOT/"config/v0.1.json"),combined,{"hh":FixtureSource([raw()])}).register(registry)
+        self.page.locator("#message").fill("Найди вакансию")
+        self.page.get_by_role("button",name="Отправить сообщение").click()
+        expect(self.page.locator("#search-diagnostics")).to_be_visible()
+        self.page.locator("#diagnostics-title").click()
+        expect(self.page.locator("#diagnostics-body")).to_contain_text("/assessment/reasoning")
+        expect(self.page.locator("#diagnostics-body")).to_contain_text("LLM_SCHEMA_INVALID")
+        expect(self.page.locator("#messages")).not_to_contain_text("1. Аналитик SQL — Не оценена")
 
 
 if __name__ == "__main__":

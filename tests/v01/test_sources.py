@@ -7,6 +7,7 @@ from playwright.sync_api import Error as BrowserError, TimeoutError as BrowserTi
 from jobradar.config import load_settings
 from jobradar.sources.base import SourceError
 from jobradar.sources.hh import HHAdapter
+from jobradar.events import collect
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -48,3 +49,28 @@ class SourceTests(unittest.TestCase):
         with self.assertRaises(SourceError) as result:
             self.adapter.fetch_details("https://example.com")
         self.assertEqual(result.exception.code,"VALIDATION_ERROR")
+
+    def test_manual_challenge_timeout_is_explicit_and_does_not_repeat_requests(self):
+        page = Mock()
+        page.url = "https://hh.ru/captcha"
+        page.goto.return_value.status = 200
+        iterator = self.adapter._navigate(page,"https://hh.ru/search/vacancy",time.monotonic()+0.01)
+        event = next(iterator)
+        self.assertEqual(event.kind,"source_action_required")
+        self.assertEqual(event.code,"CAPTCHA")
+        with self.assertRaises(SourceError) as caught:
+            collect(iterator)
+        self.assertEqual(caught.exception.code,"CAPTCHA_WAIT_EXPIRED")
+        self.assertEqual(page.goto.call_count,1)
+
+    def test_unknown_region_never_uses_request_api(self):
+        context = Mock()
+        page = context.new_page.return_value
+        page.url = "https://hh.ru/search/vacancy/advanced"
+        page.locator.return_value.count.return_value = 0
+        page.goto.return_value.status = 200
+        page.locator.return_value.first.click.side_effect = BrowserTimeout("layout changed")
+        with self.assertRaises(SourceError) as caught:
+            collect(self.adapter._area(context,"Несуществующий регион",time.monotonic()+30))
+        self.assertEqual(caught.exception.code,"AREA_UNSUPPORTED")
+        self.assertFalse(context.request.mock_calls)

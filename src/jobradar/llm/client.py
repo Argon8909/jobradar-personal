@@ -9,9 +9,10 @@ from jobradar.diagnostics import record
 
 
 class LLMError(RuntimeError):
-    def __init__(self, message="Не удалось получить ответ DeepSeek.", *, retryable=False):
+    def __init__(self, message="Не удалось получить ответ DeepSeek.", *, retryable=False, code="LLM_ERROR"):
         super().__init__(message)
         self.retryable = retryable
+        self.code = code
 
 
 def read_api_key(env_path: Path) -> str:
@@ -22,7 +23,7 @@ def read_api_key(env_path: Path) -> str:
             if separator and name.strip() == "DEEPSEEK_API_KEY":
                 key = value.strip().strip("\"'")
     if not key:
-        raise LLMError("Укажите DEEPSEEK_API_KEY в локальном .env.")
+        raise LLMError("Укажите DEEPSEEK_API_KEY в локальном .env.",code="LLM_KEY_MISSING")
     return key
 
 
@@ -53,14 +54,14 @@ class DeepSeekClient:
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise LLMError("Достигнут предел времени поисковой задачи.")
+                    raise LLMError("Достигнут предел времени поисковой задачи.",code="LLM_TIMEOUT")
                 timeout = min(timeout,remaining)
             try:
                 with self._opener(req, timeout=timeout) as response:
                     result = json.load(response)
                 choice = result["choices"][0]
                 if choice.get("finish_reason") == "length":
-                    raise LLMError("Ответ DeepSeek обрезан; действие не выполнено.")
+                    raise LLMError("Ответ DeepSeek обрезан; действие не выполнено.",code="LLM_TRUNCATED")
                 message = choice["message"]
                 if not isinstance(message, dict) or message.get("role") != "assistant":
                     raise ValueError()
@@ -84,11 +85,11 @@ class DeepSeekClient:
                            402:"Проверьте баланс DeepSeek.",403:"DeepSeek отклонил доступ.",
                            429:"Превышен лимит запросов DeepSeek."}.get(exc.code,"Ошибка HTTP при обращении к DeepSeek.")
                 exc.close()
-                failure = LLMError(message, retryable=retryable)
+                failure = LLMError(message, retryable=retryable,code=f"LLM_HTTP_{exc.code}")
             except (error.URLError, TimeoutError, ConnectionError, OSError):
-                failure = LLMError("DeepSeek временно недоступен.", retryable=True)
+                failure = LLMError("DeepSeek временно недоступен.", retryable=True,code="LLM_NETWORK")
             except (ValueError, KeyError, IndexError, TypeError):
-                raise LLMError("DeepSeek вернул некорректный ответ.") from None
+                raise LLMError("DeepSeek вернул некорректный ответ.",code="LLM_PROTOCOL") from None
             if not failure.retryable or attempt == retries:
                 record("llm","generation_failed",attempt=attempt+1,retryable=failure.retryable)
                 raise failure from None

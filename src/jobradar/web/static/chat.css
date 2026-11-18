@@ -5,3 +5,4 @@
 .arrow-icon{width:1em;height:1em;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;vertical-align:middle}
 .message-content a{color:#4d6b39;text-decoration-color:#a5b98a;text-underline-offset:3px}.message-content a:hover{text-decoration-color:currentColor}
 @media(prefers-reduced-motion:reduce){.conversation{scroll-behavior:auto}}
+.search-diagnostics{flex-shrink:0;max-height:30vh;overflow:auto;padding:12px 24px;border-bottom:1px solid var(--line);font-size:12px;line-height:1.6;overflow-wrap:anywhere}.search-diagnostics[hidden]{display:none}.search-diagnostics summary{cursor:pointer;font-weight:600}.search-diagnostics p{margin:8px 0}.search-diagnostics a{color:#4d6b39}

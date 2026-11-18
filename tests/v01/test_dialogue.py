@@ -17,9 +17,9 @@ from jobradar.tools.registry import definitions
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def intent(actions=(), *, accept=False, same=True, evidence="создай"):
+def intent(actions=(), *, accept=False, same=True, evidence="создай", explain_search=False):
     return {"role":"assistant", "content":json.dumps({"actions":[{"name":n,"arguments":a,"evidence":evidence} for n,a in actions],
-                                                      "accept_proposal":accept,"same_topic":same})}
+                                                      "accept_proposal":accept,"same_topic":same,"explain_search":explain_search})}
 
 
 def calls(*items):

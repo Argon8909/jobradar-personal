@@ -22,6 +22,7 @@ def definitions(state):
 class ToolRegistry:
     def __init__(self):
         self.handlers = {}
+        self.diagnostics_reader = None
 
     def register(self, name, handler):
         if name not in DEFINITIONS or name in self.handlers:

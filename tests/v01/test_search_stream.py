@@ -23,7 +23,7 @@ class CombinedClient(FixtureLLM):
 
     def complete(self,messages,**kwargs):
         try:
-            data = json.loads(messages[-1]["content"])
+            data = json.loads(messages[1]["content"]) if len(messages) > 1 else {}
         except (ValueError,TypeError):
             data = {}
         if "input" in data:
@@ -85,6 +85,28 @@ class StreamingSearchTests(unittest.TestCase):
             self.assertEqual(task["state"],"failed")
             self.assertIn("INTERRUPTED",task["stop_reason"])
         self.assertEqual(self.client.get("/api/state").status_code,200)
+
+    def test_explain_errors_uses_saved_diagnostics_without_proposing_search(self):
+        response = self.request(); response.get_data(); response.close()
+        before = len(self.source.requests)
+        self.llm.dialogue.responses += [intent(explain_search=True)]
+        response = self.client.post("/api/chat",json={"message":"Почему так много не проанализировано?"},headers={"X-JobRadar-CSRF":self.token})
+        answer_text = response.get_json()["answer"]
+        self.assertIn("Попыток нового анализа: 1",answer_text)
+        self.assertNotIn("Подтверждаете",answer_text)
+        self.assertEqual(len(self.source.requests),before)
+        self.assertEqual(self.llm.dialogue.responses,[])
+        with self.db.connection() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM search_tasks").fetchone()[0],1)
+
+    def test_diagnostics_read_is_scoped_to_active_context(self):
+        response = self.request(); response.get_data(); response.close()
+        report = self.client.get("/api/search-diagnostics").get_json()
+        self.assertEqual(report["diagnostics"]["metrics"]["analysis_succeeded"],1)
+        self.assertEqual(self.client.get("/api/search-diagnostics?task_id=invalid").status_code,400)
+        self.manager.create_context("Другой",authorized=True)
+        self.assertEqual(self.client.get(f"/api/search-diagnostics?task_id={report['task_id']}").status_code,403)
+        self.assertIsNone(self.client.get("/api/search-diagnostics").get_json())
 
     def test_acceptance_two_profiles_contexts_feedback_search_and_restart(self):
         from jobradar.sources.base import RawVacancy

@@ -69,6 +69,13 @@ def load_settings(path: str | Path) -> Settings:
             raise ValueError(f"{section}.{key} must be a positive integer")
     if "hh" in values and (not isinstance(values["hh"],dict) or type(values["hh"].get("headless",False)) is not bool):
         raise ValueError("hh.headless must be a boolean")
+    for section,key in (("hh","manual_action_timeout_seconds"),("source","content_timeout_seconds")):
+        value = values.get(section,{}).get(key)
+        if value is not None and (type(value) is not int or value <= 0):
+            raise ValueError(f"{section}.{key} must be a positive integer")
+    repairs = values["retries"].get("max_structural_repairs",1)
+    if type(repairs) is not int or not 0 <= repairs <= 1:
+        raise ValueError("retries.max_structural_repairs must be 0 or 1")
     if values["llm"]["provider"] != "deepseek":
         raise ValueError("Only DeepSeek is supported in v0.1")
     temperature = values["llm"]["temperature"]

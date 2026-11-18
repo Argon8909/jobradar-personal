@@ -12,13 +12,15 @@ from jobradar.profiles.contracts import FIELD_PURPOSES, validate, validate_profi
 from jobradar.storage.chat import ChatHistory
 from jobradar.tools.dispatcher import ToolDispatcher, canonical, failure
 from jobradar.tools.registry import DEFINITIONS, READ_ONLY, definitions
+from jobradar.search.trace import explanation
 from .presentation import completed, describe, short_confirmation
 
 INTENT_SCHEMA = {
     "type":"object", "additionalProperties":False,
-    "required":["actions", "accept_proposal", "same_topic"],
+    "required":["actions", "accept_proposal", "same_topic", "explain_search"],
     "properties": {
         "accept_proposal":{"type":"boolean"}, "same_topic":{"type":"boolean"},
+        "explain_search":{"type":"boolean"},
         "actions":{"type":"array", "maxItems":20, "items":{
             "type":"object", "additionalProperties":False, "required":["name", "arguments", "evidence"],
             "properties":{"name":{"type":"string", "enum":list(DEFINITIONS)},
@@ -49,6 +51,8 @@ class DialogueAgent:
                     "и evidence — дословную цитату намерения из текущего user_message. "
                     "accept_proposal=true только если пользователь согласился с последним предложением; "
                     "тогда само предложение не дублируй в actions. При смене темы same_topic=false. "
+                    "explain_search=true если пользователь просит объяснить результаты, пропуски, ошибки или причины неоценённых вакансий прошлого поиска. "
+                    "Сам вопрос о причинах не означает запрос нового поиска; не включай search_vacancies в actions без явной команды искать. "
                     "Факты о квалификации сохраняй только по явному намерению пользователя.",
             "user_message":text, "state":state, "pending_proposal":pending,
             "recent_dialogue":self.history.dialogue_messages(12),
@@ -71,6 +75,7 @@ class DialogueAgent:
         if short_confirmation(text) and not pending:
             actions = []  # A bare yes cannot authorize an action recovered from old history.
         self.pending = None
+        self._explain_search = bool(intent.get("explain_search") and not actions)
         return {canonical(name, arguments) for name, arguments in actions if name not in READ_ONLY}
 
     def _capture_proposal(self, answer, state, prompt):
@@ -122,6 +127,19 @@ class DialogueAgent:
         yield {"event":"answer","data":result}
         return result
 
+    @staticmethod
+    def _model_result(name, result):
+        if name not in ("search_vacancies","get_search_results") or result["status"] != "success":
+            return result
+        data = dict(result["data"])
+        # Detailed skipped lists belong to diagnostics, not to the main answer.
+        data.pop("unassessed",None)
+        trace = data.pop("diagnostics",None)
+        if trace:
+            data["diagnostic_metrics"] = trace["metrics"]
+            data["diagnostic_reasons"] = list(dict.fromkeys(issue["message"] for issue in trace["issues"] if issue.get("severity") == "error"))[:10]
+        return {**result,"data":data}
+
     def _confirm(self,state):
         proposal, self.pending = self.pending, None
         if proposal["state"] != state:
@@ -131,7 +149,7 @@ class DialogueAgent:
         call_id = "confirmation_" + uuid4().hex
         self.history.append([
             {"role":"assistant","content":None,"tool_calls":[{"id":call_id,"type":"function","function":{"name":name,"arguments":json.dumps(arguments,ensure_ascii=False)}}]},
-            {"role":"tool","tool_call_id":call_id,"content":json.dumps(result,ensure_ascii=False)},
+            {"role":"tool","tool_call_id":call_id,"content":json.dumps(self._model_result(name,result),ensure_ascii=False)},
         ],state["active_context_id"])
         if result["status"] == "success":
             answer = (result["data"]["summary"] if name == "search_vacancies" else
@@ -157,6 +175,10 @@ class DialogueAgent:
         notices, errors, results = [], [], []
         try:
             grants = self._intent(text, state, prompt)
+            if self._explain_search:
+                report = self.dispatcher.search_diagnostics(state)
+                answer = explanation(report) if report else "В активном контексте ещё нет сохранённого поиска, причины которого можно разобрать."
+                return (yield from self._finish(answer,[]))
             if self._confirmed_proposal:
                 self.pending = self._confirmed_proposal
                 return (yield from self._confirm(state))
@@ -224,7 +246,7 @@ class DialogueAgent:
                         else:
                             errors.append((name,result["error"]["message"]))
                     tool_message = {"role":"tool", "tool_call_id":call_id,
-                                    "content":json.dumps(result, ensure_ascii=False)}
+                                    "content":json.dumps(self._model_result(name,result), ensure_ascii=False)}
                     messages.append(tool_message)
                     stored.append(tool_message)
                     results.append({"name":name, "result":result})

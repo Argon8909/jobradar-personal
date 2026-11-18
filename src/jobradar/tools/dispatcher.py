@@ -27,6 +27,18 @@ class ToolDispatcher:
             if name not in self.registry.handlers:
                 self.registry.register(name, self._profile_handler(name))
 
+    def search_diagnostics(self, state, task_id=None):
+        if not self.registry.diagnostics_reader or state["active_context_id"] is None:
+            return None
+        guarded = ProfileManager(self.manager.database,self.manager.user_id,self.manager.session_id,
+                                 expected_context_id=state["active_context_id"])
+        try:
+            return self.registry.diagnostics_reader(guarded,state,task_id)
+        except ProfileError as exc:
+            if exc.code == "TASK_NOT_FOUND":
+                return None
+            raise
+
     @staticmethod
     def _profile_handler(name):
         def run(manager, arguments, state):

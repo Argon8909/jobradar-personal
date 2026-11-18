@@ -76,10 +76,14 @@ def results(db, state, task_id=None, limit=20):
         "ON cv.vacancy_id=tv.vacancy_id AND cv.context_id=? WHERE tv.task_id=? "
         "ORDER BY (cv.profile_revision=? AND cv.criteria_revision=?) DESC,cv.relevance_score DESC,tv.vacancy_id LIMIT ?",
         (state["active_context_id"],current["id"],state["profile"]["revision"],state["context"]["criteria_revision"],1000))]
-    visible = [vid for vid in ids if not hard_mismatch(vacancies.get_card(db,vid) or {},state["context"]["criteria"])]
+    views = [vacancy_view(db,vid,state) for vid in ids]
+    evaluated = [view for view in views if view["assessment_is_current"]]
+    visible = [view for view in evaluated if not hard_mismatch(vacancies.get_card(db,view["vacancy_id"]) or {},state["context"]["criteria"])]
+    unassessed = [{"vacancy_id":view["vacancy_id"],"title":view["title"],"url":view["url"],
+                   "state":"stale" if view["assessment"] else "missing"} for view in views if not view["assessment_is_current"]]
     return {"task_id":current["id"],"status":current["state"],"target_count":current["target_count"],"is_partial":bool(current["is_partial"]),
-            "filtered_count":len(ids)-len(visible),
-            "stop_reason":current["stop_reason"],"vacancies":[vacancy_view(db,vid,state) for vid in visible[:limit]],
+            "filtered_count":len(evaluated)-len(visible),"unassessed_count":len(unassessed),"unassessed":unassessed,
+            "stop_reason":current["stop_reason"],"vacancies":visible[:limit],
             "counts":counts(db,current["id"],state)}
 
 

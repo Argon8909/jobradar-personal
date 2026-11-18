@@ -21,9 +21,19 @@ class RawVacancy:
     published_at: str | None = None
 
 
+@dataclass(frozen=True)
+class SourceEvent:
+    kind: str
+    code: str
+    message: str
+    external_id: str | None = None
+    url: str | None = None
+    stage: str = "source"
+
+
 class SourceAdapter(Protocol):
     name: str
 
-    def search(self, query: dict, *, limit: int, deadline: float) -> Iterator[RawVacancy]: ...
+    def search(self, query: dict, *, limit: int, deadline: float) -> Iterator[RawVacancy | SourceEvent]: ...
     def fetch_details(self, external_id: str) -> RawVacancy: ...
     def check_status(self, external_id: str) -> str: ...

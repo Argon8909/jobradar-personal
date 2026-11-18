@@ -1,32 +1,68 @@
 """Separate structured LLM contexts; no tools or SQL access."""
 
+import copy
 import json
+import re
 
-from jsonschema import Draft202012Validator, ValidationError
+from jsonschema import Draft202012Validator
 
 from jobradar.llm.client import LLMError
 from jobradar.storage import vacancies as repository
-from .contracts import ASSESSMENT, CARD, EXTRACTION, PLANNER_OUTPUT, RESOLUTION
+from .contracts import ASSESSMENT, CARD, EXTRACTION, PLANNER_OUTPUT, RESOLUTION, TAG
+from .errors import AnalysisError
+from jobradar.search.budget import SearchStop
 
 
 class StructuredLLM:
-    def __init__(self, client, settings, budget):
+    def __init__(self, client, settings, budget, observer=None):
         self.client, self.settings, self.budget = client, settings, budget
+        self.observer = observer
 
-    def call(self, prompt_name, data, schema):
-        self.budget.consume()
+    def warn(self, code, stage, message, *, path=None):
+        if self.observer:
+            self.observer(AnalysisError(code,stage,message,path=path).diagnostic("warning"))
+
+    def call(self, prompt_name, data, schema, *, validation_schema=None, check=None):
         prompt = (self.settings.prompts_dir / (prompt_name + ".md")).read_text(encoding="utf-8")
-        response = self.client.complete([
+        messages = [
             {"role":"system","content":prompt},
             {"role":"user","content":json.dumps({"input":data,"output_schema":schema},ensure_ascii=False,allow_nan=False)}
-        ],json_mode=True,deadline=self.budget.deadline)
-        try:
-            result = json.loads(response["content"])
-            json.dumps(result,allow_nan=False)
-            Draft202012Validator(schema).validate(result)
-        except (ValueError, KeyError, TypeError, ValidationError):
-            raise LLMError("Модель вернула данные, не соответствующие схеме.") from None
-        return result
+        ]
+        stage = data.get("mode",prompt_name)
+        repairs = self.settings.values["retries"].get("max_structural_repairs",1)
+        for attempt in range(repairs + 1):
+            self.budget.consume()
+            if attempt and self.observer:
+                self.observer({**error.diagnostic("warning"),"code":"REPAIR_REQUESTED","validation_code":error.code,
+                               "message":"Запрошено однократное исправление структуры ответа модели."})
+            try:
+                response = self.client.complete(messages,json_mode=True,deadline=self.budget.deadline)
+            except LLMError as exc:
+                raise AnalysisError(exc.code,stage,str(exc)) from None
+            content = response.get("content")
+            try:
+                result = json.loads(content)
+                json.dumps(result,allow_nan=False)
+            except (ValueError,TypeError):
+                error = AnalysisError("LLM_JSON_INVALID",stage,"Ответ модели не является корректным JSON.",path="/",rule="json")
+            else:
+                invalid = next(Draft202012Validator(validation_schema or schema).iter_errors(result),None)
+                if invalid:
+                    # Validator messages can contain private source/model data.
+                    path = "/" + "/".join(str(part).replace("~","~0").replace("/","~1") for part in invalid.absolute_path)
+                    error = AnalysisError("LLM_SCHEMA_INVALID",stage,"Ответ модели нарушает схему данных.",path=path,rule=invalid.validator)
+                else:
+                    try:
+                        if check:
+                            check(result)
+                        return result
+                    except AnalysisError as exc:
+                        error = exc
+            if attempt == repairs:
+                raise error
+            messages += [{"role":"assistant","content":content if isinstance(content,str) else ""},
+                         {"role":"user","content":json.dumps({"task":"Исправь ответ по исходным данным и output_schema; не добавляй неизвестных фактов.",
+                            "validation_error":{"code":error.code,"path":error.path,"rule":error.rule},"output_schema":schema},ensure_ascii=False)}]
 
 
 class SearchPlanner:
@@ -44,8 +80,13 @@ class SearchPlanner:
                 raise LLMError("План поиска содержит неподключённый источник.")
             query.setdefault("filters",{})
             # The planner cannot silently discard the user's explicit hard filters.
-            if criteria.get("locations"):
-                query["areas"] = list(criteria["locations"])
+            locations = criteria.get("locations") or query.get("areas",[])
+            remote = {"удалённо","удаленно","удалёнка","удаленка","remote","удалённая работа","удаленная работа"}
+            query["areas"] = [name for name in locations if name.strip().casefold() not in remote]
+            if len(query["areas"]) != len(locations):
+                self.llm.warn("LOCATION_IS_FORMAT","search_planner","Удалённая работа распознана как формат работы, а не география.")
+                if not criteria.get("work_formats"):
+                    query["filters"]["work_formats"] = ["remote"]
             if criteria.get("work_formats"):
                 query["filters"]["work_formats"] = list(criteria["work_formats"])
         plan["queries"].sort(key=lambda query:query.get("priority",0))
@@ -59,19 +100,36 @@ class VacancyAnalyzer:
         self.llm = structured
 
     def extract(self, vacancy, state, request=None):
+        envelope = copy.deepcopy(EXTRACTION)
+        # Tag validation is independent of the usable core card/assessment.
+        envelope["properties"]["tags"]["items"] = {}
         result = self.llm.call("vacancy_analyzer",{
             "mode":"extract_and_assess","vacancy":vacancy,
-            "profile":state["profile"]["profile_data"],"criteria":state["context"]["criteria"],"request":request},EXTRACTION)
-        for tag in result["tags"]:
-            if not tag["name"].strip() or not tag["evidence"].strip() or tag["evidence"] not in vacancy["description"]:
-                raise LLMError("Подтверждение тега отсутствует в исходном объявлении.")
+            "profile":state["profile"]["profile_data"],"criteria":state["context"]["criteria"],"request":request},EXTRACTION,
+            validation_schema=envelope,check=self._check_card)
+        valid = []
+        for index,tag in enumerate(result["tags"]):
+            invalid = not Draft202012Validator(TAG).is_valid(tag)
+            match = None
+            if not invalid and tag["name"].strip() and tag["evidence"].strip():
+                match = re.search(r"\s+".join(re.escape(word) for word in tag["evidence"].split()),vacancy["description"])
+            if not match:
+                self.llm.warn("TAG_INVALID" if invalid else "TAG_EVIDENCE_MISSING","tag_validation",
+                              "Тег пропущен: неверная структура или нет подтверждённой цитаты в объявлении.",path=f"/tags/{index}")
+                result["card"]["structured_data"].setdefault("uncertainties",[]).append("Один из тегов не прошёл проверку; карточка и оценка сохранены без него.")
+                continue
+            valid.append({**tag,"evidence":match.group(0)})
+        result["tags"] = valid
+        return result
+
+    @staticmethod
+    def _check_card(result):
         card = result["card"]
         if card.get("salary_from") is not None and card.get("salary_to") is not None and card["salary_from"] > card["salary_to"]:
-            raise LLMError("Границы зарплаты в карточке противоречат друг другу.")
+            raise AnalysisError("CARD_SALARY_INVALID","extract_and_assess","Границы зарплаты в карточке противоречат друг другу.",path="/card/salary_from",rule="salary_bounds")
         reserved = set(CARD["properties"]) | {"skills","tags","qualifications","licenses","certifications","requirements"}
         if any(item["key"] in reserved for item in card["structured_data"].get("additional_facts",[])):
-            raise LLMError("Дополнительные факты дублируют нормализованные поля карточки.")
-        return result
+            raise AnalysisError("CARD_FACT_DUPLICATE","extract_and_assess","Дополнительные факты дублируют нормализованные поля карточки.",path="/card/structured_data/additional_facts",rule="normalized_fields")
 
     def assess(self, card, tags, state, request=None):
         return self.llm.call("vacancy_analyzer",{
@@ -92,16 +150,25 @@ class TagResolver:
                 candidates = repository.tag_candidates(db,tag["category"],tag["name"])
             tag_id = exact["id"] if exact else None
             if not exact and candidates:
-                result = self.llm.call("tag_resolver",{"name":tag["name"],"category":tag["category"],
-                                      "evidence":tag["evidence"],"candidates":candidates},RESOLUTION)
+                try:
+                    result = self.llm.call("tag_resolver",{"name":tag["name"],"category":tag["category"],
+                                          "evidence":tag["evidence"],"candidates":candidates},RESOLUTION)
+                except (LLMError,SearchStop) as exc:
+                    self.llm.warn(exc.code,"tag_resolution","Не удалось сопоставить тег; корректные карточка и оценка сохранены без него.")
+                    uncertainties.append("Сопоставление одного из тегов не завершено.")
+                    continue
                 if result["decision"] == "ambiguous":
                     uncertainties.append("Неоднозначное соответствие тега: " + tag["name"])
                     continue
                 if result["decision"] == "use_existing":
                     if result["tag_id"] not in {candidate["id"] for candidate in candidates}:
-                        raise LLMError("Модель выбрала неизвестный тег.")
+                        self.llm.warn("TAG_ID_INVALID","tag_resolution","Тег пропущен: модель выбрала неизвестный идентификатор.")
+                        uncertainties.append("Модель выбрала неизвестный идентификатор тега.")
+                        continue
                     tag_id = result["tag_id"]
                 elif result["tag_id"] is not None:
-                    raise LLMError("Новый тег не должен содержать существующий идентификатор.")
+                    self.llm.warn("TAG_ID_INVALID","tag_resolution","Тег пропущен: противоречивое решение о создании тега.")
+                    uncertainties.append("Противоречивое решение о создании одного из тегов.")
+                    continue
             resolved.append({**tag,"tag_id":tag_id})
         return resolved, uncertainties
