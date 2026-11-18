@@ -1,23 +1,83 @@
 """Small local per-task diagnostic files, separate from the logical domain schema."""
 
 import json
+import hashlib
+import re
+import time
+from datetime import datetime, timezone
 
 from jobradar.diagnostics import record
 
 
 class TaskTrace:
-    def __init__(self, database, task_id):
+    def __init__(self, database, task_id, settings=None):
         self.path = database.path.parent / "search-diagnostics" / f"task-{task_id}.json"
         self.data = {"task_id":task_id,"metrics":{"analysis_attempts":0,"analysis_succeeded":0,
             "analysis_failed":0,"cache_hits":0,"reassessments":0,"repair_requests":0,
             "tag_warnings":0,"source_skipped":0,"duplicate_skipped":0},"issues":[]}
         self.context = {}
+        self.options = settings.values.get("diagnostics",{}) if settings else {}
+        self.llm_options = {key:value for key,value in settings.values["llm"].items() if key in ("provider","model","temperature","max_tokens","timeout_seconds")} if settings else {}
+        self.data["llm_calls"] = []
+        self.data["started_at"] = datetime.now(timezone.utc).isoformat()
+
+    def prune(self):
+        cutoff = time.time() - self.options.get("retention_days",7)*86400
+        try:
+            for path in self.path.parent.glob("task-*.json"):
+                if path != self.path and path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+        except OSError:
+            record("search","diagnostics_cleanup_failed")
+
+    @staticmethod
+    def redact(value):
+        if isinstance(value,dict):
+            return {key:("[REDACTED]" if re.search(r"api[_-]?key|authorization|cookie|password|secret|token",key,re.I) else TaskTrace.redact(item)) for key,item in value.items()}
+        if isinstance(value,list):
+            return [TaskTrace.redact(item) for item in value]
+        if isinstance(value,str):
+            value = re.sub(r"(?i)Bearer\s+[^\s\"']+","Bearer [REDACTED]",value)
+            return re.sub(r"(?i)((?:api[_-]?key|password|secret|token|cookie|authorization)[\"']?\s*[:=]\s*[\"']?)[^\s\"',;}]+",r"\1[REDACTED]",value)
+        return value
+
+    def llm_call(self, *, prompt_name, messages, schema, model, response, attempt, elapsed_ms, error=None):
+        call = {**self.context,"id":len(self.data.setdefault("llm_calls",[]))+1,
+                "time":datetime.now(timezone.utc).isoformat(),"prompt":prompt_name,"model":model,
+                "prompt_sha256":hashlib.sha256(messages[0]["content"].encode()).hexdigest(),
+                "attempt":attempt+1,"is_repair":attempt>0,"elapsed_ms":elapsed_ms,
+                "status":"error" if error else "success","error":self.redact(error),
+                "finish_reason":response.get("finish_reason"),"usage":response.get("usage")}
+        call["capture_mode"] = self.options.get("capture_llm","errors")
+        call["parameters"] = self.llm_options
+        capture = self.options.get("capture_llm","errors")
+        if capture == "all" or capture == "errors" and (error or attempt):
+            limit = self.options.get("max_response_chars",65536)
+            raw = response.get("content")
+            call.update(response=self.redact(raw[:limit]) if isinstance(raw,str) else raw,
+                        response_truncated=isinstance(raw,str) and len(raw)>limit,
+                        schema=schema,system_prompt=self.redact(messages[0]["content"]),
+                        request=self.redact(messages[1]["content"][:limit]))
+        self.data["llm_calls"].append(call)
+        self.save()
 
     def save(self):
         try:
             self.path.parent.mkdir(parents=True,exist_ok=True)
             temporary = self.path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(self.data,ensure_ascii=False,indent=2),encoding="utf-8")
+            encoded = json.dumps(self.data,ensure_ascii=False,indent=2)
+            limit = self.options.get("max_file_bytes",5242880)
+            if len(encoded.encode()) > limit:
+                for call in self.data.get("llm_calls",[]):
+                    for key in ("response","request","system_prompt","schema"):
+                        call.pop(key,None)
+                    call["payload_evicted"] = True
+                    encoded = json.dumps(self.data,ensure_ascii=False,indent=2)
+                    if len(encoded.encode()) <= limit:
+                        break
+                self.data["payload_limit_reached"] = True
+                encoded = json.dumps(self.data,ensure_ascii=False,indent=2)
+            temporary.write_text(encoded,encoding="utf-8")
             temporary.replace(self.path)
         except OSError:
             record("search","diagnostics_write_failed",task_id=self.data["task_id"])
@@ -26,13 +86,13 @@ class TaskTrace:
         self.data["metrics"][name] += amount
 
     def issue(self, item):
-        item = {**self.context,**item}
+        item = self.redact({"time":datetime.now(timezone.utc).isoformat(),**self.context,**item})
         if item["code"] == "REPAIR_REQUESTED":
             self.count("repair_requests")
         if item.get("severity") == "warning" and str(item.get("stage","")).startswith("tag"):
             self.count("tag_warnings")
         self.data["issues"].append(item)
-        record("search","processing_issue",task_id=self.data["task_id"],**item)
+        record("search","processing_issue",task_id=self.data["task_id"],**{key:value for key,value in item.items() if key in ("code","stage","path","rule","severity","vacancy_id")})
         self.save()
 
     @staticmethod
@@ -52,11 +112,11 @@ class TaskTrace:
         return None
 
     @classmethod
-    def existing(cls, database, task_id):
+    def existing(cls, database, task_id, settings=None):
         data = cls.load(database,task_id)
         if data is None:
             return None
-        trace = cls(database,task_id)
+        trace = cls(database,task_id,settings)
         trace.data = data
         return trace
 

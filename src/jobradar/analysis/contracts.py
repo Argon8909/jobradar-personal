@@ -41,5 +41,5 @@ HH_FILTERS = obj({"work_formats":{"type":"array","items":{"enum":["remote","hybr
 QUERY = obj({"source":TEXT,"text":{**TEXT,"minLength":1},"areas":STRINGS,"filters":HH_FILTERS,
              "priority":{"type":"integer"}},("source","text"))
 PLAN = obj({"version":{"const":1},"queries":{"type":"array","minItems":1,"maxItems":8,"items":QUERY}},("version","queries"))
-PLANNER_OUTPUT = obj({"search_queries":PLAN,"target_count":{"type":["integer","null"],"minimum":1,"maximum":2147483647,
+PLANNER_OUTPUT = obj({"search_queries":PLAN,"resolved_locations":{"type":"array","maxItems":30,"items":obj({"input":TEXT,"areas":{"type":"array","minItems":1,"maxItems":30,"items":TEXT},"explanation":TEXT},("input","areas","explanation"))},"target_count":{"type":["integer","null"],"minimum":1,"maximum":2147483647,
                      "description":"Явно запрошенное число вакансий для изучения; null если пользователь не указал."}},("search_queries","target_count"))

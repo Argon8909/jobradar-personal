@@ -63,6 +63,35 @@
         ],
         "additionalProperties": false
       },
+      "resolved_locations": {
+        "type": "array",
+        "maxItems": 30,
+        "items": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string"
+            },
+            "areas": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 30,
+              "items": {
+                "type": "string"
+              }
+            },
+            "explanation": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "input",
+            "areas",
+            "explanation"
+          ],
+          "additionalProperties": false
+        }
+      },
       "target_count": {
         "type": [
           "integer",

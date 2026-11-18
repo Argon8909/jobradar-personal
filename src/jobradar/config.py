@@ -74,6 +74,13 @@ def load_settings(path: str | Path) -> Settings:
         if value is not None and (type(value) is not int or value <= 0):
             raise ValueError(f"{section}.{key} must be a positive integer")
     repairs = values["retries"].get("max_structural_repairs",1)
+    diagnostics = values.get("diagnostics",{})
+    if not isinstance(diagnostics,dict) or diagnostics.get("capture_llm","errors") not in ("off","errors","all"):
+        raise ValueError("diagnostics.capture_llm must be off, errors or all")
+    for key in ("retention_days","max_response_chars","max_file_bytes"):
+        value = diagnostics.get(key)
+        if value is not None and (type(value) is not int or value <= 0):
+            raise ValueError(f"diagnostics.{key} must be a positive integer")
     if type(repairs) is not int or not 0 <= repairs <= 1:
         raise ValueError("retries.max_structural_repairs must be 0 or 1")
     if values["llm"]["provider"] != "deepseek":

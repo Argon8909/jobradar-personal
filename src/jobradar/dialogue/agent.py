@@ -12,7 +12,6 @@ from jobradar.profiles.contracts import FIELD_PURPOSES, validate, validate_profi
 from jobradar.storage.chat import ChatHistory
 from jobradar.tools.dispatcher import ToolDispatcher, canonical, failure
 from jobradar.tools.registry import DEFINITIONS, READ_ONLY, definitions
-from jobradar.search.trace import explanation
 from .presentation import completed, describe, short_confirmation
 
 INTENT_SCHEMA = {
@@ -129,15 +128,13 @@ class DialogueAgent:
 
     @staticmethod
     def _model_result(name, result):
-        if name not in ("search_vacancies","get_search_results") or result["status"] != "success":
+        if name not in ("search_vacancies","get_search_results","get_vacancy_details") or result["status"] != "success":
             return result
         data = dict(result["data"])
         # Detailed skipped lists belong to diagnostics, not to the main answer.
         data.pop("unassessed",None)
-        trace = data.pop("diagnostics",None)
-        if trace:
-            data["diagnostic_metrics"] = trace["metrics"]
-            data["diagnostic_reasons"] = list(dict.fromkeys(issue["message"] for issue in trace["issues"] if issue.get("severity") == "error"))[:10]
+        for key in ("diagnostics","stop_reason","warnings","search_plan"):
+            data.pop(key,None)
         return {**result,"data":data}
 
     def _confirm(self,state):
@@ -177,7 +174,7 @@ class DialogueAgent:
             grants = self._intent(text, state, prompt)
             if self._explain_search:
                 report = self.dispatcher.search_diagnostics(state)
-                answer = explanation(report) if report else "В активном контексте ещё нет сохранённого поиска, причины которого можно разобрать."
+                answer = (f"В поиске #{report['task_id']} найдено {report['counts']['found_count']}, оценено {report['counts']['evaluated_count']}. Подробный разбор доступен в панели диагностики." if report else "В активном контексте ещё нет сохранённого поиска, причины которого можно разобрать.")
                 return (yield from self._finish(answer,[]))
             if self._confirmed_proposal:
                 self.pending = self._confirmed_proposal

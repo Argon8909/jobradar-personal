@@ -254,7 +254,8 @@ class SearchTests(unittest.TestCase):
         loaded = self.service().diagnostics(self.manager,self.manager.get_state())
         self.assertEqual(loaded["unassessed"][0]["path"],"/assessment/reasoning")
         diagnostic_file = self.db.path.parent / "search-diagnostics" / f"task-{report['task_id']}.json"
-        self.assertNotIn(raw().description,diagnostic_file.read_text())
+        logged = json.loads(diagnostic_file.read_text())
+        self.assertTrue(any(call.get("response") for call in logged["llm_calls"] if call["status"] == "error"))
 
     def test_one_structural_repair_recovers_core_within_total_call_budget(self):
         original = self.client.complete

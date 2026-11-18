@@ -258,6 +258,7 @@ class BrowserChatTests(unittest.TestCase):
             except (ValueError,TypeError): data = {}
             if data.get("mode") == "extract_and_assess":
                 result = json.loads(response["content"]); result["assessment"]["reasoning"] = 0
+                result["card"]["summary"] = '<img src=x onerror="window.__diagnosticXSS=true">'
                 response["content"] = json.dumps(result)
             return response
         combined.complete = invalid
@@ -268,11 +269,25 @@ class BrowserChatTests(unittest.TestCase):
         SearchService(self.db,load_settings(ROOT/"config/v0.1.json"),combined,{"hh":FixtureSource([raw()])}).register(registry)
         self.page.locator("#message").fill("Найди вакансию")
         self.page.get_by_role("button",name="Отправить сообщение").click()
-        expect(self.page.locator("#search-diagnostics")).to_be_visible()
-        self.page.locator("#diagnostics-title").click()
-        expect(self.page.locator("#diagnostics-body")).to_contain_text("/assessment/reasoning")
-        expect(self.page.locator("#diagnostics-body")).to_contain_text("LLM_SCHEMA_INVALID")
-        expect(self.page.locator("#messages")).not_to_contain_text("1. Аналитик SQL — Не оценена")
+        expect(self.page.locator("#messages")).to_contain_text("найдено 1, оценено 0")
+        expect(self.page.locator("#messages")).not_to_contain_text("LLM_SCHEMA_INVALID")
+        expect(self.page.locator("#messages")).not_to_contain_text("/assessment/reasoning")
+        expect(self.page.get_by_role("link",name="Открыть диагностику поисков")).to_be_visible()
+        self.page.goto(f"http://127.0.0.1:{self.server.server_port}/diagnostics")
+        expect(self.page.locator("#summary")).to_contain_text("Поиск #1")
+        expect(self.page.locator("#issues")).to_contain_text("LLM_SCHEMA_INVALID")
+        expect(self.page.locator("#issues")).to_contain_text("/assessment/reasoning")
+        expect(self.page.locator("#calls details").filter(has=self.page.locator("summary",has_text="vacancy_analyzer")).first).to_be_visible()
+        self.assertEqual(self.page.locator("#calls img").count(),0)
+        self.assertFalse(self.page.evaluate("Boolean(window.__diagnosticXSS)"))
+        with self.page.expect_download() as download:
+            self.page.get_by_role("button",name="Скачать диагностический JSON").click()
+        destination=Path(self.temp.name)/"diagnostic-export.json"
+        download.value.save_as(destination)
+        exported=json.loads(destination.read_text())
+        self.assertEqual(exported["task_id"],1)
+        self.assertTrue(any(call.get("response") for call in exported["diagnostics"]["llm_calls"]))
+
 
 
 if __name__ == "__main__":
