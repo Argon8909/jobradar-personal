@@ -106,6 +106,25 @@ class BrowserChatTests(unittest.TestCase):
         self.page.get_by_role("button",name="Обновить историю").click()
         expect(self.page.locator("#error")).to_be_hidden()
 
+    def test_readable_confirmation_accepts_plain_yes_without_model_regeneration(self):
+        args = {"profession":"Системный аналитик","profile_data":{"competencies":["SQL","REST API"],"experience":[{"domain":"API","years":1.42}]}}
+        self.fake.responses += [intent(),calls(("p1","create_profile",args)),answer("Создать профиль?")]
+        self.page.locator("#message").fill("Обсудим мою профессию")
+        self.page.get_by_role("button",name="Отправить сообщение").click()
+        last = self.page.locator(".assistant .message-content").last
+        expect(last).to_contain_text("Подтверждаете?")
+        expect(last).to_contain_text("Навыки: SQL; REST API")
+        expect(last).not_to_contain_text("profile_data")
+        expect(last).not_to_contain_text("{")
+        self.fake.responses.clear()
+        before = len(self.fake.requests)
+        self.page.locator("#message").fill("да")
+        self.page.get_by_role("button",name="Отправить сообщение").click()
+        expect(self.page.locator("#context-title")).to_have_text("Системный аналитик")
+        expect(self.page.locator(".assistant .message-content").last).to_contain_text("Создан профиль")
+        expect(self.page.locator(".assistant .message-content").last).not_to_contain_text("Подтверждаете?")
+        self.assertEqual(len(self.fake.requests),before)
+
     def test_hh_parser_uses_full_description_and_safe_vacancy_links(self):
         from jobradar.sources.hh import extract, vacancy_links, challenge
 

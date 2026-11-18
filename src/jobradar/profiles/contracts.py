@@ -21,6 +21,24 @@ _validators = {
     for item in _definitions
 }
 
+FIELD_PURPOSES = {
+    "profile_data":"Профессиональная квалификация: профессия, навыки, опыт, образование, допуски. Не условия поиска.",
+    "criteria":"Условия поиска: география, формат работы, зарплата, занятость, предпочтения и ограничения. После создания профиля первый контекст активен; условия можно сохранить отдельным update_context.",
+}
+
+
+def validate_profile_fields(data):
+    """Enforce the documented profile/criteria boundary without changing JSON Schema."""
+    criteria_keys = {"work_format_preference","work_format","work_formats","salary","salary_remote","salary_office",
+                     "salary_min","salary_expectations","employment_type","employment_preference","relocation",
+                     "locations","location","geography","adjacent_roles","target_roles","preferences","restrictions"}
+    for item in data.get("additional_attributes",[]):
+        key = item["key"].strip().casefold()
+        if key in criteria_keys or key.startswith("salary_"):
+            raise ProfileError("VALIDATION_ERROR",
+                "Условия поиска (формат работы, география, зарплата, занятость и направления) относятся к критериям контекста. "
+                "В профиле оставьте квалификацию; условия сохраните отдельной командой обновления контекста после создания профиля.")
+
 
 def validate(command: str, arguments: dict) -> dict:
     try:

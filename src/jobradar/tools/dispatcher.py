@@ -5,7 +5,7 @@ import sqlite3
 from types import GeneratorType
 
 from jobradar.profiles import ProfileError, ProfileManager
-from jobradar.profiles.contracts import validate
+from jobradar.profiles.contracts import validate, validate_profile_fields
 from .registry import READ_ONLY, ToolRegistry, allowed_names
 from jobradar.events import collect
 
@@ -49,6 +49,8 @@ class ToolDispatcher:
             if name not in allowed_names(expected_state):
                 return failure("TOOL_NOT_ALLOWED", "Команда недоступна в текущем режиме.")
             arguments = validate(name, arguments)
+            if name in ("create_profile","update_profile"):
+                validate_profile_fields(arguments.get("profile_data",{}) if name == "create_profile" else arguments["changes"])
             if name not in READ_ONLY and grant != canonical(name, arguments):
                 return failure("CONFIRMATION_REQUIRED", "Для этого действия требуется согласие пользователя.")
             handler = self.registry.handlers.get(name)

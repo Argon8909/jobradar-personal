@@ -109,15 +109,54 @@ class DialogueTests(unittest.TestCase):
         agent.chat("Да")
         self.assertEqual(self.manager.list_profiles(), {"profiles":[]})
 
-    def test_consent_cannot_change_proposed_arguments(self):
+    def test_confirmation_executes_original_arguments_without_regeneration(self):
         original = {"profession":"Аналитик"}
         different = {"profession":"Водитель"}
         agent = self.agent(intent(),calls(("c1","create_profile",original)),answer())
         agent.chat("Посоветуй направление")
         agent.client.responses += [intent(accept=True),calls(("c2","create_profile",different)),answer()]
         result = agent.chat("Да")
-        self.assertEqual(self.manager.list_profiles(), {"profiles":[]})
-        self.assertIn("Подтверждаете", result["answer"])
+        self.assertEqual(self.manager.list_profiles()["profiles"][0]["profession"],"Аналитик")
+        self.assertEqual(result["llm_calls"],0)
+        self.assertNotIn("Подтверждаете", result["answer"])
+
+    def test_short_yes_variants_execute_saved_action_without_any_llm_call(self):
+        variants = ("да"," Да! ","подтверждаю","я подтверждаю","да,я подтверждаю","Да, согласен")
+        for text in variants:
+            with self.subTest(text=text):
+                agent = self.agent()
+                agent.pending = {"name":"create_profile","arguments":{"profession":"Аналитик"},"state":self.manager.get_state()}
+                result = agent.chat(text)
+                self.assertIsNotNone(result["active_context_id"])
+                self.assertEqual(result["llm_calls"],0)
+                self.assertEqual(agent.client.requests,[])
+                self.manager.return_to_general(authorized=True)
+
+    def test_semantic_consent_also_executes_exact_proposal_after_one_intent_call(self):
+        agent = self.agent(intent(accept=True))
+        agent.pending = {"name":"create_profile","arguments":{"profession":"Аналитик"},"state":self.manager.get_state()}
+        result = agent.chat("Согласен с этим предложением")
+        self.assertIsNotNone(result["active_context_id"])
+        self.assertEqual(result["llm_calls"],1)
+
+    def test_conditional_yes_does_not_execute_old_proposal(self):
+        original = {"profession":"Аналитик"}
+        changed = {"profession":"Аналитик","profile_data":{"competencies":["SQL"]}}
+        agent = self.agent(intent(),calls(("c2","create_profile",changed)),answer())
+        agent.pending = {"name":"create_profile","arguments":original,"state":self.manager.get_state()}
+        result = agent.chat("Да, но добавь SQL")
+        self.assertEqual(self.manager.list_profiles(),{"profiles":[]})
+        self.assertIn("Подтверждаете",result["answer"])
+
+    def test_stale_yes_does_not_call_model_or_change_another_context(self):
+        self.manager.create_profile("Аналитик",authorized=True)
+        agent = self.agent()
+        agent.pending = {"name":"update_context","arguments":{"changes":{"notes":"Старое условие"}},"state":self.manager.get_state()}
+        self.manager.create_context("Другой",authorized=True)
+        result = agent.chat("Да")
+        self.assertIn("устарело",result["answer"])
+        self.assertEqual(result["llm_calls"],0)
+        self.assertNotIn("notes",self.manager.get_state()["context"]["criteria"])
 
     def test_context_change_invalidates_pending_consent(self):
         self.manager.create_profile("Аналитик", authorized=True)

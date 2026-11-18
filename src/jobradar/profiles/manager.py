@@ -5,7 +5,7 @@ import json
 from jobradar.storage import Database
 from jobradar.storage import profiles as repository
 
-from .contracts import ProfileError, validate
+from .contracts import ProfileError, validate, validate_profile_fields
 
 _UNSET = object()
 
@@ -113,6 +113,7 @@ class ProfileManager:
         if profile_data is not _UNSET:
             arguments["profile_data"] = profile_data
         arguments = validate("create_profile", arguments)
+        validate_profile_fields(arguments.get("profile_data",{}))
         self._authorize(authorized)
         data = {**arguments.get("profile_data", {}), "profession": profession, "schema_version": 1}
         with self.database.transaction() as db:
@@ -164,6 +165,7 @@ class ProfileManager:
 
     def update_profile(self, changes, *, authorized=False, expected_revision=None):
         changes = validate("update_profile", {"changes": changes})["changes"]
+        validate_profile_fields(changes)
         self._authorize(authorized)
         with self.database.transaction() as db:
             active = self._active(db)

@@ -161,6 +161,16 @@ class ProfileManagerTests(unittest.TestCase):
         self.assert_code("VALIDATION_ERROR", self.manager.create_context, "Новый", None, authorized=True)
         self.assertEqual(self.manager.get_state(), before)
 
+    def test_search_preferences_cannot_be_saved_as_profile_attributes(self):
+        for key in ("work_format_preference","salary_remote","relocation","employment_type","adjacent_roles"):
+            with self.subTest(key=key):
+                data = {"additional_attributes":[{"key":key,"value":"Тестовое условие","description":"Условие поиска"}]}
+                self.assert_code("VALIDATION_ERROR",self.manager.create_profile,"Аналитик",data,authorized=True)
+        self.assertEqual(self.manager.list_profiles(),{"profiles":[]})
+        self.create()
+        self.assert_code("VALIDATION_ERROR",self.manager.update_profile,
+            {"additional_attributes":[{"key":"salary_office","value":130000,"description":"Доход"}]},authorized=True)
+
     def test_user_isolation_and_session_forgery(self):
         first = self.create()
         with self.database.transaction() as db:

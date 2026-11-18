@@ -1,16 +1,18 @@
 """Bounded dialogue loop; semantic intent comes from LLM, permission checks from Python."""
 
 import json
+from uuid import uuid4
 
 from jsonschema import Draft202012Validator, ValidationError
 
 from jobradar.llm.client import LLMError
 from jobradar.events import collect
 from jobradar.profiles import ProfileError
-from jobradar.profiles.contracts import validate
+from jobradar.profiles.contracts import FIELD_PURPOSES, validate, validate_profile_fields
 from jobradar.storage.chat import ChatHistory
 from jobradar.tools.dispatcher import ToolDispatcher, canonical, failure
 from jobradar.tools.registry import DEFINITIONS, READ_ONLY, definitions
+from .presentation import completed, describe, short_confirmation
 
 INTENT_SCHEMA = {
     "type":"object", "additionalProperties":False,
@@ -21,18 +23,6 @@ INTENT_SCHEMA = {
             "type":"object", "additionalProperties":False, "required":["name", "arguments", "evidence"],
             "properties":{"name":{"type":"string", "enum":list(DEFINITIONS)},
                           "arguments":{"type":"object"}, "evidence":{"type":"string", "minLength":1}}}}}}
-
-LABELS = {"create_profile":"Создать профиль", "create_context":"Создать контекст",
-          "switch_context":"Переключить контекст", "return_to_general":"Вернуться в общий диалог",
-          "update_profile":"Обновить профиль", "update_context":"Обновить критерии",
-          "search_vacancies":"Запустить поиск"}
-
-
-def describe(name, arguments):
-    values = arguments.get("changes", arguments)
-    detail = json.dumps(values, ensure_ascii=False) if values else ""
-    return LABELS.get(name, name) + (": " + detail if detail else "")
-
 
 class DialogueAgent:
     def __init__(self, manager, client, settings, dispatcher=None):
@@ -62,6 +52,7 @@ class DialogueAgent:
                     "Факты о квалификации сохраняй только по явному намерению пользователя.",
             "user_message":text, "state":state, "pending_proposal":pending,
             "recent_dialogue":self.history.dialogue_messages(12),
+            "field_purposes":FIELD_PURPOSES,
             "tool_definitions":list(DEFINITIONS.values()), "output_schema":INTENT_SCHEMA}
         answer = self._complete([{"role":"system", "content":prompt},
                                  {"role":"user", "content":json.dumps(task, ensure_ascii=False)}], json_mode=True)
@@ -74,7 +65,11 @@ class DialogueAgent:
         except (ValueError, KeyError, TypeError, ProfileError, ValidationError):
             raise LLMError("Не удалось надёжно определить намерение. Уточните команду.") from None
         if intent["accept_proposal"] and intent["same_topic"] and pending:
+            if not actions:
+                self._confirmed_proposal = pending
             actions.append((pending["name"], pending["arguments"]))
+        if short_confirmation(text) and not pending:
+            actions = []  # A bare yes cannot authorize an action recovered from old history.
         self.pending = None
         return {canonical(name, arguments) for name, arguments in actions if name not in READ_ONLY}
 
@@ -87,7 +82,7 @@ class DialogueAgent:
                           "{\"proposal\":null} либо {\"proposal\":{\"name\":имя инструмента,"
                           "\"arguments\":точные аргументы,\"evidence\":дословная цитата из assistant_text}}. "
                           "Не выдумывай неизвестные аргументы.",
-            "assistant_text":answer, "state":state, "tools":definitions(state)}
+            "assistant_text":answer, "state":state, "tools":definitions(state),"field_purposes":FIELD_PURPOSES}
         try:
             response = self._complete([{"role":"system", "content":prompt},
                                        {"role":"user", "content":json.dumps(task, ensure_ascii=False)}], json_mode=True)
@@ -103,11 +98,47 @@ class DialogueAgent:
             if not isinstance(evidence, str) or not evidence.strip() or evidence not in answer:
                 return
             arguments = validate(name, proposal["arguments"])
+            if name in ("create_profile","update_profile"):
+                validate_profile_fields(arguments.get("profile_data",{}) if name == "create_profile" else arguments["changes"])
             self.pending = {"name":name, "arguments":arguments, "state":state}
         except (LLMError, ValueError, KeyError, TypeError):
             # Failure to identify a proposal never grants permission. The user can
             # issue an explicit command instead; no action is executed here.
             return
+
+    def _describe(self,name,arguments):
+        context_name = None
+        if name == "switch_context":
+            for profile in self.manager.list_profiles()["profiles"]:
+                for context in profile["contexts"]:
+                    if context["context_id"] == arguments["context_id"]:
+                        context_name = context["name"]
+        return describe(name,arguments,context_name=context_name)
+
+    def _finish(self,answer,results):
+        active = self.manager.get_state()["active_context_id"]
+        self.history.append([{"role":"assistant","content":answer}],active)
+        result = {"answer":answer,"calls":results,"llm_calls":self._llm_calls,"active_context_id":active}
+        yield {"event":"answer","data":result}
+        return result
+
+    def _confirm(self,state):
+        proposal, self.pending = self.pending, None
+        if proposal["state"] != state:
+            return (yield from self._finish("Предложение устарело: контекст или данные изменились. Сформулируйте действие заново.",[]))
+        name, arguments = proposal["name"], proposal["arguments"]
+        result = yield from self.dispatcher.events(name,arguments,expected_state=state,grant=canonical(name,arguments))
+        call_id = "confirmation_" + uuid4().hex
+        self.history.append([
+            {"role":"assistant","content":None,"tool_calls":[{"id":call_id,"type":"function","function":{"name":name,"arguments":json.dumps(arguments,ensure_ascii=False)}}]},
+            {"role":"tool","tool_call_id":call_id,"content":json.dumps(result,ensure_ascii=False)},
+        ],state["active_context_id"])
+        if result["status"] == "success":
+            answer = (result["data"]["summary"] if name == "search_vacancies" else
+                      completed(name,self._describe(name,result["data"].get("updated_fields",arguments))))
+        else:
+            answer = "Действие не выполнено. " + result["error"]["message"]
+        return (yield from self._finish(answer,[{"name":name,"result":result}]))
 
     def chat(self, text):
         return collect(self.events(text))
@@ -116,13 +147,19 @@ class DialogueAgent:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Message must be a nonempty string")
         self._llm_calls = 0
+        self._confirmed_proposal = None
         state = self.manager.get_state()
         prompt = (self.settings.prompts_dir / "dialogue.md").read_text(encoding="utf-8")
         transcript = self.history.dialogue_messages()
         self.history.append([{"role":"user", "content":text}], state["active_context_id"])
+        if self.pending and short_confirmation(text):
+            return (yield from self._confirm(state))
         notices, errors, results = [], [], []
         try:
             grants = self._intent(text, state, prompt)
+            if self._confirmed_proposal:
+                self.pending = self._confirmed_proposal
+                return (yield from self._confirm(state))
             count, seen = 0, {}
             messages = [{"role":"system", "content":prompt}] + transcript + [{"role":"user", "content":text}]
             while count < self.settings.values["dialogue"]["max_tool_calls"]:
@@ -134,6 +171,7 @@ class DialogueAgent:
                     self.pending = None
                     state = current
                 context = {"state":state, "profiles":self.manager.list_profiles()["profiles"],
+                           "field_purposes":FIELD_PURPOSES,
                            "authorized_actions":[json.loads(key) for key in sorted(grants)],
                            "unavailable_tools":sorted(set(DEFINITIONS) - set(self.dispatcher.registry.handlers))}
                 response = self._complete(messages + [{"role":"user", "content":json.dumps(context, ensure_ascii=False)}],
@@ -170,11 +208,12 @@ class DialogueAgent:
                         grants.discard(signature)
                         seen[call_id] = (signature, result)
                         if result["status"] == "success":
+                            errors = [item for item in errors if item[0] != name]
                             if name not in READ_ONLY:
                                 if name == "search_vacancies":
                                     notices.append(result["data"]["summary"])
                                 else:
-                                    notices.append("Выполнено: " + describe(name, result["data"].get("updated_fields", arguments)))
+                                    notices.append(completed(name,self._describe(name, result["data"].get("updated_fields", arguments))))
                                 self.pending = None
                             state = self.manager.get_state()
                         elif result["error"]["code"] == "CONFIRMATION_REQUIRED":
@@ -183,7 +222,7 @@ class DialogueAgent:
                             validate(name, arguments)
                             self.pending = {"name":name, "arguments":arguments, "state":state}
                         else:
-                            errors.append(result["error"]["message"])
+                            errors.append((name,result["error"]["message"]))
                     tool_message = {"role":"tool", "tool_call_id":call_id,
                                     "content":json.dumps(result, ensure_ascii=False)}
                     messages.append(tool_message)
@@ -193,17 +232,13 @@ class DialogueAgent:
             else:
                 answer = "Достигнут лимит команд. Продолжите отдельным сообщением."
             if errors:
-                answer = " ".join(dict.fromkeys(errors))
+                answer = " ".join(dict.fromkeys(message for name,message in errors))
             if not self.pending and not errors and count < self.settings.values["dialogue"]["max_tool_calls"]:
                 self._capture_proposal(answer, state, prompt)
             if self.pending:
-                answer = "Предлагаю: " + describe(self.pending["name"], self.pending["arguments"]) + ". Подтверждаете?"
+                answer = "Предлагаю: " + self._describe(self.pending["name"], self.pending["arguments"]) + "\nПодтверждаете?"
             answer = "\n".join(notices + [answer])
         except LLMError as exc:
             answer = "\n".join(notices + [str(exc)])
             self.pending = None
-        self.history.append([{"role":"assistant", "content":answer}], self.manager.get_state()["active_context_id"])
-        result = {"answer":answer, "calls":results, "llm_calls":self._llm_calls,
-                  "active_context_id":self.manager.get_state()["active_context_id"]}
-        yield {"event":"answer","data":result}
-        return result
+        return (yield from self._finish(answer,results))
