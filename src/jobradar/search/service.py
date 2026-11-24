@@ -12,7 +12,7 @@ from jobradar.profiles import ProfileError
 from jobradar.sources.base import SourceError, SourceEvent
 from jobradar.storage import search as tasks, vacancies
 from .budget import SearchStop, TaskBudget
-from .filters import hard_mismatch
+from .filters import hard_mismatch, preliminary_mismatch, candidate_priority
 from .trace import TaskTrace, attach_diagnostics
 
 class SearchService:
@@ -30,11 +30,15 @@ class SearchService:
         if manager.get_state() != state:
             raise SearchStop("CONTEXT_CHANGED","Профиль или критерии изменились во время поиска.")
 
+    # Bounded in-memory portion, not a persistent queue or a new business limit.
+    BATCH_SIZE = 10
+
     def search(self, manager, arguments, state):
         budget = self.budget_factory(self.settings)
         request = arguments.get("request")
         goal = request or "Поиск: " + state["profile"]["profile_data"]["profession"]
-        target = self.settings.values["search"].get("target_count",20)
+        limits = self.settings.values["search"]
+        target = limits.get("target_count",20)
         with self.database.transaction() as db:
             manager._active(db)
             task_id = tasks.create_task(db,state,goal,target)
@@ -42,191 +46,275 @@ class SearchService:
         trace.prune()
         structured = StructuredLLM(self.client,self.settings,budget,observer=trace.issue,recorder=trace)
         planner, analyzer, resolver = SearchPlanner(structured), VacancyAnalyzer(structured), TagResolver(self.database,structured)
-        processed, new_analyses, collected = set(), 0, 0
-        attempted = set()
+        processed, attempted, filtered, deferred = set(), set(), set(), set()
+        discovered, adapter_seen, read_keys = set(), set(), set()
+        coverage = {"planned_queries":0,"completed_queries":0,"source_complete":False,
+                    "hh_limit_reached":False,"stages_completed":[]}
+        trace.data["coverage"] = coverage
+        reasons, iterator, clarification = [], None, None
+        last_snapshot = None
+        last_visible_ids = set()
         record("search","task_started",task_id=task_id,context_id=state["active_context_id"])
-        reasons = []
-        iterator = None
-        clarification = None
-        try:
-            yield {"event":"search_started","data":{"task_id":task_id,"message":"Поиск запущен"}}
-            output = planner.plan(state,request,self.sources)
-            plan = output["search_queries"]
-            trace.data["search_plan"] = plan
-            trace.save()
-            target = output["target_count"] or target
-            with self.database.transaction() as db:
-                tasks.save_plan(db,task_id,plan)
-                db.execute("UPDATE search_tasks SET target_count=? WHERE id=?",(target,task_id))
-            terms = list(dict.fromkeys(word for query in plan["queries"] for word in re.findall(r"[\w+#.-]{3,}",query["text"])))
-            with self.database.connection() as db:
-                # Reserve one slot for the mandatory source check; the shared cap
-                # includes cached candidates and repeated source discoveries.
-                local = vacancies.local_candidates(db,terms,max(0,self.settings.values["search"]["max_source_vacancies"]-1))
 
-            def process(vacancy_id):
-                nonlocal new_analyses
-                budget.check(); self._valid_state(manager,state)
-                with self.database.connection() as db:
-                    raw = vacancies.get_raw(db,vacancy_id)
-                    card = vacancies.get_card(db,vacancy_id)
-                    assessment = vacancies.get_assessment(db,state["active_context_id"],vacancy_id)
-                    tags = vacancies.get_tags(db,vacancy_id)
-                key = (vacancy_id,raw["content_hash"],analyzer.VERSION)
-                if key in attempted:
-                    trace.count("duplicate_skipped")
+        def issue(code, message, stage, severity="info"):
+            trace.issue({"code":code,"stage":stage,"message":message,"severity":severity})
+
+        def defer(vacancy_id, code, message):
+            deferred.add(vacancy_id)
+            trace.data["metrics"]["deferred"] = len(deferred)
+            reasons.append(code + ": " + message)
+            issue(code,message,"deferred")
+
+        def reject(vacancy_id, message):
+            filtered.add(vacancy_id)
+            trace.data["metrics"]["filtered"] = len(filtered)
+            issue("PRE_FILTERED",message,"pre_filter")
+
+        def process(vacancy_id):
+            budget.check(); self._valid_state(manager,state)
+            with self.database.connection() as db:
+                raw = vacancies.get_raw(db,vacancy_id)
+                card = vacancies.get_card(db,vacancy_id)
+                assessment = vacancies.get_assessment(db,state["active_context_id"],vacancy_id)
+                tags = vacancies.get_tags(db,vacancy_id)
+            key = (vacancy_id,raw["content_hash"],analyzer.VERSION,raw["status"])
+            if key in attempted:
+                trace.count("duplicate_skipped")
+                return
+            attempted.add(key)
+            processed.discard(vacancy_id); filtered.discard(vacancy_id); deferred.discard(vacancy_id)
+            current = vacancies.card_current(raw,card,analyzer.VERSION)
+            mismatch = preliminary_mismatch(raw,state["context"]["criteria"],card if current else None)
+            if mismatch:
+                reject(vacancy_id,mismatch)
+                return
+            reusable = tasks.assessment_current(raw,card,assessment,state)
+            if current and reusable:
+                trace.count("cache_hits")
+            else:
+                if not raw.get("description") and not current:
+                    defer(vacancy_id,"SOURCE_INCOMPLETE","Для извлечения карточки нужен полный исходный текст.")
                     return
-                current = bool(card and card["source_hash"] == raw["content_hash"] and card["extraction_version"] == analyzer.VERSION)
-                # A one-off request narrows retrieval, not the saved criteria or
-                # the meaning of the context's persistent personal assessment.
-                reusable = tasks.assessment_current(raw,card,assessment,state)
+                if budget.calls >= budget.max_calls:
+                    defer(vacancy_id,"LLM_LIMIT","Достигнут предел обращений к модели; сбор исходников продолжается.")
+                    return
                 if current:
-                    attempted.add(key)
-                    if not reusable:
-                        trace.count("reassessments")
-                        assessment = analyzer.assess(card,tags,state)
-                    else:
-                        trace.count("cache_hits")
-                    mismatch = hard_mismatch(card,state["context"]["criteria"])
-                    if mismatch:
-                        assessment = {"decision":"Не соответствует обязательным условиям","reasoning":mismatch,"relevance_score":None}
-                    if not reusable or mismatch:
-                        with self.database.transaction() as db:
-                            manager._active(db)
-                            vacancies.save_assessment(db,vacancy_id,assessment,state)
+                    trace.count("reassessments")
+                    assessment = analyzer.assess(card,tags,state)
+                    self._valid_state(manager,state)
+                    with self.database.transaction() as db:
+                        manager._active(db)
+                        vacancies.save_assessment(db,vacancy_id,assessment,state)
                 else:
-                    if new_analyses >= self.settings.values["search"]["max_new_analyses"]:
-                        raise SearchStop("ANALYSIS_LIMIT","Достигнут предел новых анализов вакансий.")
-                    new_analyses += 1
-                    attempted.add(key)
+                    if trace.data["metrics"]["analysis_attempts"] >= limits["max_new_analyses"]:
+                        defer(vacancy_id,"ANALYSIS_LIMIT","Достигнут предел новых анализов; сбор исходников продолжается.")
+                        return
                     trace.count("analysis_attempts")
-                    try:
-                        result = analyzer.extract(raw,state)
-                    except (LLMError,SearchStop):
-                        trace.count("analysis_failed")
-                        raise
+                    result = analyzer.extract(raw,state)
                     tags, uncertain = resolver.resolve(result["tags"])
                     if uncertain:
                         result["card"]["structured_data"].setdefault("uncertainties",[]).extend(uncertain)
                     mismatch = hard_mismatch(result["card"],state["context"]["criteria"])
                     if mismatch:
                         result["assessment"] = {"decision":"Не соответствует обязательным условиям","reasoning":mismatch,"relevance_score":None}
+                        reject(vacancy_id,mismatch)
                     self._valid_state(manager,state)
                     with self.database.transaction() as db:
                         manager._active(db)
                         vacancies.save_card_bundle(db,raw,result["card"],tags,result["assessment"],state,analyzer.VERSION)
                     trace.count("analysis_succeeded")
-                processed.add(vacancy_id)
+            processed.add(vacancy_id)
 
-            def process_safely(vacancy_id):
-                trace.context = {"vacancy_id":vacancy_id}
-                try:
-                    process(vacancy_id)
-                except LLMError as exc:
-                    issue = exc.diagnostic() if isinstance(exc,AnalysisError) else {"code":exc.code,"stage":"vacancy_analysis","message":str(exc),"severity":"error"}
-                    trace.issue(issue)
-                    reasons.append(exc.code + ": " + str(exc))
-                except (ProfileError,sqlite3.Error):
-                    trace.issue({"code":"DATA_ERROR","stage":"persistence","message":"Не удалось сохранить карточку или оценку вакансии.","severity":"error"})
+        def process_safely(vacancy_id):
+            trace.context = {"vacancy_id":vacancy_id}
+            try:
+                process(vacancy_id)
+            except LLMError as exc:
+                trace.issue(exc.diagnostic() if isinstance(exc,AnalysisError) else
+                            {"code":exc.code,"stage":"vacancy_analysis","message":str(exc),"severity":"error"})
+                reasons.append(exc.code + ": " + str(exc))
+            except SearchStop as exc:
+                if exc.code != "LLM_LIMIT":
                     raise
-                except SearchStop as exc:
-                    trace.issue({"code":exc.code,"stage":"vacancy_analysis","message":str(exc),"severity":"error"})
-                    raise
-                finally:
-                    trace.context = {}
-                    trace.save()
+                defer(vacancy_id,exc.code,str(exc))
+            except (ProfileError,sqlite3.Error):
+                issue("DATA_ERROR","Не удалось сохранить карточку или оценку.","persistence","error")
+                raise
+            finally:
+                trace.context = {}
+                metrics = trace.data["metrics"]
+                metrics["analysis_failed"] = metrics["analysis_attempts"] - metrics["analysis_succeeded"]
+                metrics["filtered"], metrics["deferred"] = len(filtered),len(deferred)
+                trace.save()
 
-            def progress():
-                return {"event":"search_progress","data":{"task_id":task_id,"evaluated_count":len(processed),"collected_count":collected}}
+        def progress():
+            return {"event":"search_progress","data":{"task_id":task_id,"evaluated_count":len(processed),
+                     "collected_count":len(discovered),"saved_count":trace.data["metrics"]["hh_saved"]}}
 
-            for raw in local:
-                budget.check()
-                collected += 1
-                with self.database.transaction() as db:
-                    tasks.attach(db,task_id,raw["id"],"database")
-                process_safely(raw["id"])
+        def snapshot():
+            nonlocal last_snapshot, last_visible_ids
+            with self.database.connection() as db:
+                result = tasks.results(db,state,task_id,self.settings.values["results"]["default_limit"])
+            trace.data["metrics"]["visible_results"] = result["result_count"]
+            signature = vacancies.encode(result["vacancies"])
+            if signature != last_snapshot and (result["vacancies"] or last_snapshot is not None):
+                last_snapshot = signature
+                last_visible_ids = {item["vacancy_id"] for item in result["vacancies"]}
+                yield {"event":"search_results","data":{"task_id":task_id,"vacancies":result["vacancies"],
+                        "result_count":result["result_count"],"replace":True}}
+
+        def process_batch(ids):
+            # Save the whole available portion first; route existing cards before
+            # raw candidates within a newly collected portion as well.
+            with self.database.connection() as db:
+                rows = [(vid,vacancies.get_raw(db,vid),vacancies.get_card(db,vid)) for vid in dict.fromkeys(ids)]
+            rows.sort(key=lambda item:(not vacancies.card_current(item[1],item[2],analyzer.VERSION),
+                                       -candidate_priority(item[1],terms)))
+            for vid,raw,card in rows:
+                process_safely(vid)
                 yield progress()
-                if len(processed) >= target:
-                    break
-            # Always try the source at least once, even with a sufficient local cache.
+                yield from snapshot()
+
+        def discover(source, external_id):
+            key = (source,str(external_id))
+            if key in discovered:
+                return True
+            if len(discovered) >= limits["max_source_vacancies"]:
+                return False
+            discovered.add(key); adapter_seen.add(key)
+            trace.data["metrics"]["hh_discovered"] = len(discovered)
+            return True
+
+        try:
+            yield {"event":"search_started","data":{"task_id":task_id,"message":"Поиск запущен"}}
+            output = planner.plan(state,request,self.sources)
+            plan = output["search_queries"]
+            trace.data["search_plan"] = plan
+            coverage["planned_queries"] = len(plan["queries"])
+            target = output["target_count"] or target
+            with self.database.transaction() as db:
+                tasks.save_plan(db,task_id,plan)
+                db.execute("UPDATE search_tasks SET target_count=? WHERE id=?",(target,task_id))
+            terms = list(dict.fromkeys(word for query in plan["queries"] for word in re.findall(r"[\w+#.-]{3,}",query["text"])))
+            for current,stage in ((True,"cards"),(False,"raw")):
+                budget.check(); self._valid_state(manager,state)
+                with self.database.connection() as db:
+                    ids = vacancies.local_candidate_ids(db,terms,current=current,version=analyzer.VERSION)
+                trace.count("local_candidates",len(ids))
+                for offset in range(0,len(ids),self.BATCH_SIZE):
+                    batch = ids[offset:offset+self.BATCH_SIZE]
+                    with self.database.transaction() as db:
+                        manager._active(db)
+                        for vid in batch:
+                            tasks.attach(db,task_id,vid,"database")
+                    yield from process_batch(batch)
+                coverage["stages_completed"].append(stage)
             for query in plan["queries"]:
                 budget.check(); self._valid_state(manager,state)
-                remaining = self.settings.values["search"]["max_source_vacancies"] - collected
+                remaining = limits["max_source_vacancies"] - len(discovered)
                 if remaining <= 0:
-                    reasons.append("SOURCE_LIMIT: достигнут предел сбора")
                     break
-                source = self.sources[query["source"]]
-                iterator = iter(source.search(query,limit=remaining,deadline=budget.deadline))
+                source, pending, source_error = self.sources[query["source"]], [], None
+                iterator = iter(source.search(query,limit=remaining,deadline=budget.deadline,seen=adapter_seen))
                 try:
-                    for raw in iterator:
-                        budget.check(); self._valid_state(manager,state)
-                        if isinstance(raw,SourceEvent):
-                            issue = {"code":raw.code,"stage":raw.stage,"message":raw.message,
-                                     "external_id":raw.external_id,"url":raw.url,
-                                     "severity":"error" if raw.kind == "source_warning" else "info"}
-                            trace.issue(issue)
-                            if raw.kind == "source_warning":
+                    for item in iterator:
+                        self._valid_state(manager,state)
+                        if isinstance(item,SourceEvent):
+                            if item.kind == "source_discovered":
+                                if not discover(query["source"],item.external_id):
+                                    break
+                                trace.save()
+                                budget.check()
+                                continue
+                            budget.check()
+                            if item.kind == "source_duplicate":
+                                trace.count("hh_duplicates")
+                                continue
+                            if item.kind == "source_warning":
+                                if item.external_id and not discover(query["source"],item.external_id):
+                                    break
                                 trace.count("source_skipped")
-                                collected += 1
-                                reasons.append(raw.code + ": " + raw.message)
-                            yield {"event":raw.kind,"data":{"task_id":task_id,**issue}}
-                            if collected >= self.settings.values["search"]["max_source_vacancies"]:
-                                reasons.append("SOURCE_LIMIT: достигнут предел сбора")
-                                break
+                                reasons.append(item.code + ": " + item.message)
+                                if item.code == "VACANCY_CLOSED" and item.external_id:
+                                    with self.database.transaction() as db:
+                                        vacancies.mark_closed(db,query["source"],item.external_id)
+                                    yield from snapshot()
+                            trace.issue({"code":item.code,"stage":item.stage,"message":item.message,
+                                         "external_id":item.external_id,"url":item.url,
+                                         "severity":"error" if item.kind == "source_warning" else "info"})
+                            yield {"event":item.kind,"data":{"task_id":task_id,"message":item.message}}
                             continue
-                        if collected >= self.settings.values["search"]["max_source_vacancies"]:
-                            reasons.append("SOURCE_LIMIT: достигнут предел сбора")
-                            break
-                        collected += 1
-                        if raw.source != query["source"] or not raw.external_id or not raw.description:
-                            reasons.append("SOURCE_DATA_ERROR: неполное объявление")
+                        if item.source != query["source"] or not item.external_id:
                             trace.count("source_skipped")
-                            trace.issue({"code":"SOURCE_DATA_ERROR","stage":"source_extraction","message":"Источник вернул неполное объявление.","severity":"error"})
+                            issue("SOURCE_DATA_ERROR","Источник вернул некорректный идентификатор.","source_extraction","error")
+                            reasons.append("SOURCE_DATA_ERROR: некорректное объявление")
                             continue
-                        with self.database.transaction() as db:
-                            vacancy_id = vacancies.upsert_raw(db,raw)
-                            tasks.attach(db,task_id,vacancy_id,"source")
-                        # The same vacancy may have changed since a local-cache pass.
-                        with self.database.connection() as db:
-                            stored_raw = vacancies.get_raw(db,vacancy_id)
-                            card = vacancies.get_card(db,vacancy_id)
-                        changed = not card or card["source_hash"] != stored_raw["content_hash"]
-                        if (vacancy_id not in processed and len(processed) < target) or (vacancy_id in processed and changed):
-                            processed.discard(vacancy_id)
-                            process_safely(vacancy_id)
-                        yield progress()
-                        if len(processed) >= target:
+                        key = (item.source,str(item.external_id))
+                        if not discover(*key):
                             break
+                        if key in read_keys:
+                            trace.count("hh_duplicates")
+                            continue
+                        read_keys.add(key)
+                        trace.count("hh_read" if item.description else "hh_incomplete")
+                        with self.database.transaction() as db:
+                            manager._active(db)
+                            vid = vacancies.upsert_raw(db,item)
+                            tasks.attach(db,task_id,vid,"source")
+                            if not vacancies.card_current(vacancies.get_raw(db,vid),vacancies.get_card(db,vid),analyzer.VERSION):
+                                processed.discard(vid)
+                        trace.count("hh_saved")
+                        pending.append(vid)
+                        yield progress()
+                        if vid in last_visible_ids:
+                            yield from snapshot()
+                        # Preserve an already received source even if its read
+                        # consumed the last time slice. Do not start another read
+                        # or paid analysis after the deadline.
+                        budget.check()
+                        if len(pending) >= self.BATCH_SIZE:
+                            batch,pending = pending,[]
+                            yield from process_batch(batch)
+                except (SourceError,SearchStop) as exc:
+                    source_error = exc
                 finally:
                     close = getattr(iterator,"close",None)
                     if close:
                         close()
                     iterator = None
-                if len(processed) >= target:
-                    break
-                if collected >= self.settings.values["search"]["max_source_vacancies"]:
-                    reasons.append("SOURCE_LIMIT: достигнут предел сбора")
-                    break
-            if len(processed) < target:
+                yield from process_batch(pending)
+                yield from snapshot()
+                if source_error:
+                    raise source_error
                 budget.check()
+                coverage["completed_queries"] += 1
+            coverage["hh_limit_reached"] = len(discovered) >= limits["max_source_vacancies"]
+            coverage["source_complete"] = coverage["completed_queries"] == coverage["planned_queries"] and not coverage["hh_limit_reached"]
+            coverage["stages_completed"].append("source")
+            if coverage["hh_limit_reached"]:
+                reasons.append("SOURCE_LIMIT: достигнут предел уникальных обнаружений HH")
+            with self.database.connection() as db:
+                visible = tasks.results(db,state,task_id,self.settings.values["results"]["default_limit"])["result_count"]
+            if visible < target:
                 reasons.append("RESULTS_EXHAUSTED: цель по количеству не достигнута")
         except (SearchStop,SourceError) as exc:
             if exc.code == "LOCATION_CLARIFICATION":
                 clarification = str(exc)
             elif exc.code == "AREA_UNSUPPORTED":
-                clarification = "Уточните конкретные страны или города поиска: один из указанных регионов не удалось выбрать на HH.ru."
+                clarification = "Уточните конкретные страны или города поиска: один из регионов не удалось выбрать на HH.ru."
             reasons.append(exc.code + ": " + str(exc))
-            trace.issue({"code":exc.code,"stage":"search","message":str(exc),"severity":"error"})
+            issue(exc.code,str(exc),"search","error")
         except LLMError as exc:
             reasons.append(exc.code + ": " + str(exc))
-            trace.issue(exc.diagnostic() if isinstance(exc,AnalysisError) else {"code":exc.code,"stage":"search","message":str(exc),"severity":"error"})
+            trace.issue(exc.diagnostic() if isinstance(exc,AnalysisError) else
+                        {"code":exc.code,"stage":"search","message":str(exc),"severity":"error"})
         except (ProfileError,sqlite3.Error):
             reasons.append("DATA_ERROR: данные изменились или не удалось их сохранить")
-            trace.issue({"code":"DATA_ERROR","stage":"persistence","message":"Данные изменились или не удалось сохранить результат.","severity":"error"})
+            issue("DATA_ERROR","Данные изменились или не удалось сохранить результат.","persistence","error")
         except GeneratorExit:
             with self.database.transaction() as db:
                 tasks.finish(db,task_id,partial=bool(processed),failed=not processed,reason="INTERRUPTED: соединение закрыто")
-            trace.issue({"code":"INTERRUPTED","stage":"search","message":"Соединение закрыто до завершения поиска.","severity":"error"})
+            issue("INTERRUPTED","Соединение закрыто до завершения поиска.","search","error")
             raise
         finally:
             if iterator is not None and getattr(iterator,"close",None):
@@ -234,17 +322,19 @@ class SearchService:
         reason = "; ".join(dict.fromkeys(reasons)) or None
         failed = bool(not processed and reason and not all(item.startswith("RESULTS_EXHAUSTED") for item in reasons))
         if not processed and not failed:
-            reason = None  # A successful empty source response is not a service failure.
+            reason = None
         with self.database.transaction() as db:
             tasks.finish(db,task_id,partial=bool(reason and processed),reason=reason,failed=failed)
             report = tasks.results(db,state,task_id,self.settings.values["results"]["default_limit"])
         trace.data["metrics"]["analysis_failed"] = trace.data["metrics"]["analysis_attempts"] - trace.data["metrics"]["analysis_succeeded"]
+        trace.data["metrics"]["visible_results"] = report["result_count"]
         trace.save()
         attach_diagnostics(report,trace.data)
-        report["clarification"] = clarification
+        report.update(clarification=clarification,coverage=coverage)
+        report["hh_counts"] = {key:trace.data["metrics"][key] for key in ("hh_discovered","hh_duplicates","hh_read","hh_saved","hh_incomplete")}
         report["summary"] = self.render_report(report)
         record("search","task_finished",task_id=task_id,state=report["status"],partial=report["is_partial"],
-               found=report["counts"]["found_count"],evaluated=len(processed),llm_calls=budget.calls,
+               found=report["counts"]["found_count"],evaluated=report["counts"]["evaluated_count"],llm_calls=budget.calls,
                stop_codes=list(dict.fromkeys(item.split(":",1)[0] for item in reasons)))
         yield {"event":"search_finished","data":{"task_id":task_id,"status":report["status"],"is_partial":report["is_partial"],"message":report["summary"].split("\n")[0]}}
         return report
@@ -259,6 +349,10 @@ class SearchService:
         if report["status"] == "failed":
             header += " Поиск завершился с ошибкой."
         lines = [header]
+        if "hh_counts" in report:
+            lines.append(f"В этом поиске с HH.ru прочитано объявлений: {report['hh_counts']['hh_read']}.")
+            if not report["coverage"]["source_complete"]:
+                lines.append("Источник просмотрен не полностью.")
         if report.get("clarification"):
             lines.append(report["clarification"])
         if report.get("unassessed_count") or report["status"] == "failed":
@@ -300,7 +394,7 @@ class SearchService:
                     card = vacancies.get_card(db,vacancy_id)
                     old = vacancies.get_assessment(db,state["active_context_id"],vacancy_id)
                     tags = vacancies.get_tags(db,vacancy_id)
-                if not card or card["source_hash"] != raw["content_hash"] or card["extraction_version"] != analyzer.VERSION:
+                if not vacancies.card_current(raw,card,analyzer.VERSION) or preliminary_mismatch(raw,state["context"]["criteria"],card):
                     continue
                 if not tasks.assessment_current(raw,card,old,state):
                     if trace:

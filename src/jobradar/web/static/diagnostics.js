@@ -36,9 +36,10 @@ function render() {
   if (report.stop_reason) paragraph(el("summary"),`Причина завершения: ${report.stop_reason}`);
   const trace=report.diagnostics;
   if (trace) {
-    const labels={analysis_attempts:"Попыток нового анализа",analysis_succeeded:"Успешно",analysis_failed:"Ошибок",cache_hits:"Из кэша",reassessments:"Переоценок",repair_requests:"Исправлений структуры",tag_warnings:"Предупреждений тегов",source_skipped:"Не прочитано на сайте",duplicate_skipped:"Повторов пропущено"};
+    const labels={analysis_attempts:"Попыток нового анализа",analysis_succeeded:"Успешно",analysis_failed:"Ошибок",cache_hits:"Из кэша",reassessments:"Переоценок",repair_requests:"Исправлений структуры",tag_warnings:"Предупреждений тегов",source_skipped:"Не прочитано на сайте",duplicate_skipped:"Повторной обработки пропущено",hh_discovered:"Уникальных обнаружений HH",hh_duplicates:"Повторов HH",hh_read:"Полных исходников HH",hh_saved:"Сохранений HH",hh_incomplete:"Неполных исходников HH",local_candidates:"Локальных кандидатов",filtered:"Отфильтровано",deferred:"Отложено",visible_results:"Результатов для выдачи"};
     for (const [key,value] of Object.entries(trace.metrics)) {const p=paragraph(el("summary"),`${labels[key] || key}: ${value}`);p.className="metric";}
     if (trace.payload_limit_reached) paragraph(el("summary"),"Достигнут размер файла: часть тел ответов удалена, метаданные сохранены.");
+    if (trace.coverage) paragraph(el("summary"),`Запросов завершено: ${trace.coverage.completed_queries}/${trace.coverage.planned_queries}. Охват источника: ${trace.coverage.source_complete ? "завершены запланированные запросы" : "неполный"}.`);
   } else paragraph(el("summary"),"Подробный журнал отсутствует: старый поиск, отключённая запись, очистка по сроку или ошибка сохранения.");
   el("plan").textContent=JSON.stringify(report.search_plan || trace?.search_plan || null,null,2);
   issuesView();

@@ -115,10 +115,10 @@ class SearchPlanner:
             query["areas"] = [name for name in locations if name.strip().casefold() not in remote]
             if len(query["areas"]) != len(locations):
                 self.llm.warn("LOCATION_IS_FORMAT","search_planner","Удалённая работа распознана как формат работы, а не география.")
-                if not criteria.get("work_formats"):
-                    query["filters"]["work_formats"] = ["remote"]
-            if criteria.get("work_formats"):
-                query["filters"]["work_formats"] = list(criteria["work_formats"])
+            # Algorithm 1.0 selects only keywords and areas by default. The
+            # adapter retains work_formats support for explicit future policies.
+            # Model-proposed source options never override this server policy.
+            query["filters"] = {}
         plan["queries"].sort(key=lambda query:query.get("priority",0))
         return output
 

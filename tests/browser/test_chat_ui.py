@@ -189,6 +189,67 @@ class BrowserChatTests(unittest.TestCase):
         self.assertEqual(vacancy.title,"Системный аналитик")
         self.assertIn("REST API & JSON",vacancy.description)
 
+    def test_hh_preserves_format_filter_and_deduplicates_across_queries(self):
+        from urllib.parse import parse_qs,urlparse
+        from jobradar.sources.hh import HHAdapter
+        from jobradar.sources.base import RawVacancy,SourceEvent
+        adapter=HHAdapter(load_settings(ROOT/"config/v0.1.json"))
+        requests=[]
+        def site(route):
+            query=parse_qs(urlparse(route.request.url).query)
+            if "/search/" in route.request.url:
+                requests.append(query)
+                if query.get("page")==["0"]:
+                    ids=["10","11"] if query.get("text")==["first"] else ["11","12"]
+                    body="".join(f'<a href="https://hh.ru/vacancy/{vid}">{vid}</a>' for vid in ids)
+                else:
+                    body='<div data-qa="vacancy-serp__no-vacancies">Empty</div>'
+            else:
+                body='<h1>Analyst</h1><div data-qa="vacancy-description">SQL</div>'
+            route.fulfill(content_type="text/html; charset=utf-8",body=body)
+        self.context.route("https://hh.ru/**",site)
+        @contextmanager
+        def browser_context():
+            yield self.context
+        seen=set()
+        with patch.object(adapter,"_browser",browser_context):
+            first=list(adapter.search({"text":"first","areas":["Москва"],"filters":{"work_formats":["remote"]}},limit=2,deadline=time.monotonic()+10,seen=seen))
+            second=list(adapter.search({"text":"second","areas":["Москва"],"filters":{"work_formats":["remote"]}},limit=1,deadline=time.monotonic()+10,seen=seen))
+        self.assertEqual([v.external_id for v in first+second if isinstance(v,RawVacancy)],["10","11","12"])
+        self.assertTrue(any(isinstance(v,SourceEvent) and v.kind=="source_duplicate" for v in second))
+        self.assertEqual(len(seen),3)
+        self.assertTrue(all(q["area"]==["1"] and q["work_format"]==["REMOTE"] for q in requests))
+
+    def test_partial_selection_is_visible_before_end_and_replaced_without_duplicates(self):
+        from jobradar.search.service import SearchService
+        from test_search_stream import CombinedClient
+        from test_search import FixtureSource,raw
+        service=next(iter(self.app.extensions["jobradar_orchestrators"].values()))
+        service.agent.manager.create_profile("Аналитик",authorized=True)
+        combined=CombinedClient()
+        combined.dialogue.responses += [intent([("search_vacancies",{})],evidence="Найди"),calls(("s1","search_vacancies",{})),answer("https://hh.ru/vacancy/100 https://hh.ru/vacancy/100")]
+        service.agent.client=combined
+        released=threading.Event()
+        class PausedSource(FixtureSource):
+            def search(inner,query,**kwargs):
+                yield from super().search(query,**kwargs)
+                released.wait(5)
+                yield raw("100")
+        registry=service.agent.dispatcher.registry
+        for name in ("search_vacancies","get_search_results","get_vacancy_details"):
+            registry.handlers.pop(name)
+        SearchService(self.db,load_settings(ROOT/"config/v0.1.json"),combined,{"hh":PausedSource([raw(str(i)) for i in range(100,110)])}).register(registry)
+        self.page.locator("#message").fill("Найди вакансии")
+        self.page.get_by_role("button",name="Отправить сообщение").click()
+        try:
+            expect(self.page.locator("[data-search-preview]")).to_have_count(1)
+            expect(self.page.locator('#messages a[href="https://hh.ru/vacancy/100"]')).to_have_count(1)
+        finally:
+            released.set()
+        expect(self.page.locator("#message")).to_be_enabled()
+        expect(self.page.locator("[data-search-preview]")).to_have_count(0)
+        expect(self.page.locator('#messages a[href="https://hh.ru/vacancy/100"]')).to_have_count(1)
+
     def test_hh_manual_challenge_emits_status_and_resumes_after_user_action(self):
         from jobradar.sources.hh import HHAdapter
         from jobradar.events import collect
@@ -237,6 +298,9 @@ class BrowserChatTests(unittest.TestCase):
             yield self.context
         with patch.object(adapter,"_browser",browser_context):
             items = list(adapter.search({"text":"analyst"},limit=2,deadline=time.monotonic()+10))
+        discovered=[item for item in items if isinstance(item,SourceEvent) and item.kind == "source_discovered"]
+        self.assertEqual(len(discovered),2)
+        items=[item for item in items if not isinstance(item,SourceEvent) or item.kind != "source_discovered"]
         self.assertEqual(len(items),2)
         self.assertIsInstance(items[0],SourceEvent)
         self.assertEqual(items[0].code,"VACANCY_UNREADABLE")

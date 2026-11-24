@@ -252,14 +252,15 @@ class HHAdapter:
             raise SourceError("AREA_UNSUPPORTED",f"Не удалось определить географию HH.ru: {name}. Уточните название региона.")
         return self.areas[normalized]
 
-    def search(self, query, *, limit, deadline):
+    def search(self, query, *, limit, deadline, seen=None):
+        task_seen = seen if seen is not None else set()
         with self._browser() as context:
             areas = []
             for name in query.get("areas",[]):
                 areas.append((yield from self._area(context,name,deadline)))
             page = context.pages[0] if context.pages else context.new_page()
             detail_page = context.new_page()
-            count, seen = 0, set()
+            count, query_seen = 0, set()
             page_number = 0
             while count < limit and time.monotonic() < deadline:
                 parameters = [("text",query["text"]),("items_on_page",20),("page",page_number)]
@@ -281,15 +282,21 @@ class HHAdapter:
                 candidates = vacancy_links(page)
                 if not candidates and not page.locator('[data-qa="vacancy-serp__no-vacancies"], [data-qa="vacancy-serp__vacancy_not_found"]').count():
                     raise SourceError("SEARCH_LAYOUT_UNREADABLE","Не удалось подтвердить список вакансий или пустую выдачу HH.ru.")
-                links = [vid for vid in candidates if vid not in seen]
+                links = [vid for vid in candidates if vid not in query_seen]
                 if not links:
                     break
                 for external_id in links:
                     if count >= limit or time.monotonic() >= deadline:
                         return
-                    seen.add(external_id)
+                    query_seen.add(external_id)
+                    key = (self.name,external_id)
+                    if key in task_seen:
+                        yield SourceEvent("source_duplicate","SOURCE_DUPLICATE","Объявление уже обнаружено в этой задаче.",external_id,stage="source_discovery")
+                        continue
+                    task_seen.add(key)
                     count += 1
                     url = f"https://hh.ru/vacancy/{external_id}"
+                    yield SourceEvent("source_discovered","SOURCE_DISCOVERED","Обнаружено объявление HH.ru.",external_id,url,"source_discovery")
                     try:
                         response = yield from self._navigate(detail_page,url,deadline)
                         if response and response.status in (404,410):

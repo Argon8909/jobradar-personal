@@ -20,6 +20,7 @@ async function sendMessage(text) {
     throw new Error(body.error?.message || "Не удалось выполнить запрос.");
   }
   const reader = response.body.getReader(), decoder = new TextDecoder();
+  const previews = new Map();
   let buffer = "", completed = false;
   function accept(line) {
     if (!line.trim()) return;
@@ -27,6 +28,18 @@ async function sendMessage(text) {
     if (event.event === "search_started") byId("status").textContent = "Поиск запущен";
     if (event.event === "search_progress") byId("status").textContent = `Поиск: получено ${data.collected_count}, оценено ${data.evaluated_count}`;
     if (event.event === "search_finished") byId("status").textContent = data.message;
+    if (event.event === "search_results") {
+      const old = previews.get(data.task_id);
+      const unique = [...new Map(data.vacancies.map(item => [item.vacancy_id,item])).values()];
+      if (unique.length) {
+        const text = `Промежуточные результаты поиска #${data.task_id}\n` + unique.map((item,index) =>
+          `${index+1}. ${item.title} — ${item.assessment?.decision || "Оценено"}\n${(item.assessment?.reasoning || "").slice(0,500)}\n${item.url || ""}`).join("\n\n");
+        const node = messageNode({role:"assistant",content:text});
+        node.dataset.searchPreview = data.task_id;
+        if (old?.isConnected) old.replaceWith(node); else messages.append(node);
+        previews.set(data.task_id,node);
+      } else { old?.remove(); previews.delete(data.task_id); }
+    }
     if (event.event === "assessment_progress") byId("status").textContent = data.message;
     if (event.event === "source_action_required") byId("status").textContent = "Откройте окно HH.ru и завершите проверку или вход. Поиск ожидает вашего действия.";
     if (event.event === "source_warning") byId("status").textContent = "Поиск продолжается…";
@@ -34,6 +47,7 @@ async function sendMessage(text) {
     if (event.event === "answer") {
       completed = true;
       if (data.error) throw new Error(data.answer);
+      previews.forEach(node => node.remove());
     }
   }
   try {

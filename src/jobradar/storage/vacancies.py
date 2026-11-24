@@ -19,6 +19,14 @@ def upsert_raw(db, raw):
     previous = db.execute("SELECT id,content_hash FROM vacancies WHERE source=? AND external_id=?",
                           (raw.source,raw.external_id)).fetchone()
     stamp = now()
+    if not raw.description:
+        if previous:
+            # A partial discovery must never destroy an existing full source.
+            db.execute("UPDATE vacancies SET last_seen_at=? WHERE id=?",(stamp,previous["id"]))
+            return previous["id"]
+        return db.execute("INSERT INTO vacancies(source,external_id,url,title,employer,status,first_seen_at,last_seen_at) "
+                          "VALUES (?,?,?,?,?,'unknown',?,?)",
+                          (raw.source,raw.external_id,raw.url,raw.title,raw.employer,stamp,stamp)).lastrowid
     if previous:
         vacancy_id = previous["id"]
         db.execute("UPDATE vacancies SET url=?,title=?,employer=?,description=?,content_hash=?,published_at=?,"
@@ -39,6 +47,12 @@ def get_raw(db, vacancy_id):
     return dict(row) if row else None
 
 
+def mark_closed(db, source, external_id):
+    """Only an observed closed response, never a timeout or unreadable layout."""
+    db.execute("UPDATE vacancies SET status='closed',last_checked_at=? WHERE source=? AND external_id=?",
+               (now(),source,external_id))
+
+
 def get_card(db, vacancy_id):
     row = db.execute("SELECT * FROM vacancy_cards WHERE vacancy_id=?",(vacancy_id,)).fetchone()
     if row is None:
@@ -46,6 +60,34 @@ def get_card(db, vacancy_id):
     card = dict(row)
     card["structured_data"] = json.loads(card["structured_data"] or '{"version":1}')
     return card
+
+
+def card_current(raw, card, version=1):
+    return bool(card and raw.get("content_hash") and card["source_hash"] == raw["content_hash"]
+                and card["extraction_version"] == version)
+
+
+def local_candidate_ids(db, terms, *, current, version=1):
+    """Snapshot IDs before processing changes membership of the stale partition.
+
+    Text matches rank candidates; they do not discard uncertain/adjacent roles.
+    Snapshotting IDs avoids OFFSET skipping rows as cards are created.
+    """
+    predicate = "(c.vacancy_id IS NOT NULL AND coalesce(v.content_hash,'')<>'' AND c.source_hash=v.content_hash AND c.extraction_version=?)"
+    scores, args = [], []
+    for term in list(dict.fromkeys(terms))[:64]:
+        scores.append("CASE WHEN instr(normalize_tag(coalesce(v.title,'') || ' ' || coalesce(v.employer,'') || ' ' || "
+                      "coalesce(v.description,'') || ' ' || coalesce(c.profession,'') || ' ' || "
+                      "coalesce(c.specialization,'') || ' ' || coalesce(c.summary,'')),?)>0 OR "
+                      "EXISTS(SELECT 1 FROM vacancy_tags vt JOIN tags t ON t.id=vt.tag_id WHERE vt.vacancy_id=v.id AND "
+                      "(instr(normalize_tag(t.canonical_name),?)>0 OR EXISTS(SELECT 1 FROM tag_aliases a WHERE a.tag_id=t.id AND instr(a.normalized_alias,?)>0))) THEN 1 ELSE 0 END")
+        args.extend([normalize_tag(term)]*3)
+    score = " + ".join(scores) or "0"
+    # Explicit coalesce is important: NOT(NULL) would lose hash/version-less cards.
+    where = predicate if current else "NOT coalesce(" + predicate + ",0)"
+    return [row[0] for row in db.execute("SELECT v.id FROM vacancies v LEFT JOIN vacancy_cards c ON c.vacancy_id=v.id WHERE "
+                                       + where + " ORDER BY (" + score + ") DESC,v.last_seen_at DESC,v.id DESC",
+                                       [version,*args])]
 
 
 def get_tags(db, vacancy_id):

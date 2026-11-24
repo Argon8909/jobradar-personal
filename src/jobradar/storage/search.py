@@ -5,7 +5,7 @@ import json
 from jobradar.profiles.contracts import ProfileError
 from .profiles import now
 from . import vacancies
-from jobradar.search.filters import hard_mismatch
+from jobradar.search.filters import preliminary_mismatch
 
 
 def create_task(db, state, goal, target_count):
@@ -49,8 +49,7 @@ def task(db, context_id, task_id=None):
 
 
 def assessment_current(vacancy, card, assessment, state):
-    return bool(card and assessment and card["source_hash"] == vacancy["content_hash"]
-                and card["extraction_version"] == 1 and assessment["profile_revision"] == state["profile"]["revision"]
+    return bool(vacancies.card_current(vacancy,card) and assessment and assessment["profile_revision"] == state["profile"]["revision"]
                 and assessment["criteria_revision"] == state["context"]["criteria_revision"])
 
 
@@ -61,6 +60,7 @@ def vacancy_view(db, vacancy_id, state, *, details=False):
     card = vacancies.get_card(db,vacancy_id)
     assessment = vacancies.get_assessment(db,state["active_context_id"],vacancy_id)
     view = {"vacancy_id":vacancy_id,"title":vacancy["title"],"employer":vacancy["employer"],"url":vacancy["url"],
+            "status":vacancy["status"],
             "summary":card.get("summary") if card else None,"assessment":assessment,
             "assessment_is_current":assessment_current(vacancy,card,assessment,state),
             "source_checked_at":vacancy["fetched_at"]}
@@ -76,13 +76,18 @@ def results(db, state, task_id=None, limit=20):
         "ON cv.vacancy_id=tv.vacancy_id AND cv.context_id=? WHERE tv.task_id=? "
         "ORDER BY (cv.profile_revision=? AND cv.criteria_revision=?) DESC,cv.relevance_score DESC,tv.vacancy_id LIMIT ?",
         (state["active_context_id"],current["id"],state["profile"]["revision"],state["context"]["criteria_revision"],1000))]
-    views = [vacancy_view(db,vid,state) for vid in ids]
+    eligible = []
+    for vid in ids:
+        raw, card = vacancies.get_raw(db,vid), vacancies.get_card(db,vid)
+        if not preliminary_mismatch(raw,state["context"]["criteria"],card if vacancies.card_current(raw,card) else None):
+            eligible.append(vid)
+    views = [vacancy_view(db,vid,state) for vid in eligible]
     evaluated = [view for view in views if view["assessment_is_current"]]
-    visible = [view for view in evaluated if not hard_mismatch(vacancies.get_card(db,view["vacancy_id"]) or {},state["context"]["criteria"])]
+    visible = evaluated
     unassessed = [{"vacancy_id":view["vacancy_id"],"title":view["title"],"url":view["url"],
                    "state":"stale" if view["assessment"] else "missing"} for view in views if not view["assessment_is_current"]]
     return {"task_id":current["id"],"status":current["state"],"target_count":current["target_count"],"is_partial":bool(current["is_partial"]),
-            "filtered_count":len(evaluated)-len(visible),"unassessed_count":len(unassessed),"unassessed":unassessed,
+            "filtered_count":len(ids)-len(eligible),"result_count":len(visible),"unassessed_count":len(unassessed),"unassessed":unassessed,
             "stop_reason":current["stop_reason"],"vacancies":visible[:limit],
             "counts":counts(db,current["id"],state)}
 

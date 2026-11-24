@@ -29,10 +29,20 @@ class FixtureSource:
     def __init__(self, items):
         self.items, self.requests, self.closed = items, [], 0
 
-    def search(self, query, *, limit, deadline):
+    def search(self, query, *, limit, deadline, seen=None):
         self.requests.append(query)
         try:
-            for item in self.items[:limit]:
+            unique = set()
+            for item in self.items:
+                key = ((item.source,item.external_id) if isinstance(item,RawVacancy) else
+                       (self.name,item.external_id) if isinstance(item,SourceEvent) and item.external_id else None)
+                if key and seen is not None and key in seen:
+                    yield SourceEvent("source_duplicate","SOURCE_DUPLICATE","Повторное объявление.",key[1])
+                    continue
+                if len(unique) >= limit:
+                    break
+                if key:
+                    unique.add(key)
                 if isinstance(item,Exception):
                     raise item
                 yield item
@@ -361,7 +371,7 @@ class SearchTests(unittest.TestCase):
         state = self.manager.get_state()
         self.run_search()
         self.assertEqual(self.source.requests[0]["areas"],[])
-        self.assertEqual(self.source.requests[0]["filters"]["work_formats"],["remote"])
+        self.assertEqual(self.source.requests[0]["filters"],{})
         self.assertEqual(self.manager.get_state(),state)
 
     def test_source_limit_and_total_llm_limit(self):
@@ -373,12 +383,13 @@ class SearchTests(unittest.TestCase):
         report = self.run_search(service=self.service(max_llm_calls=1))
         self.assertIn("LLM_LIMIT",report["stop_reason"])
 
-    def test_explicit_geography_and_format_override_planner_omission(self):
+    def test_source_geography_is_preserved_and_format_is_internal_by_default(self):
         self.manager.update_context({"locations":["Москва"],"work_formats":["remote"]},authorized=True)
         self.run_search()
         query = self.source.requests[0]
         self.assertEqual(query["areas"],["Москва"])
-        self.assertEqual(query["filters"]["work_formats"],["remote"])
+        self.assertEqual(query["filters"],{})
+        self.assertEqual(self.manager.get_state()["context"]["criteria"]["work_formats"],["remote"])
 
     def test_proven_hard_format_conflict_is_not_presented(self):
         self.manager.update_context({"work_formats":["remote"]},authorized=True)
@@ -419,7 +430,8 @@ class SearchTests(unittest.TestCase):
         self.client.target = 3
         iterator = self.service().search(self.manager,{},self.manager.get_state())
         self.assertEqual(next(iterator)["event"],"search_started")
-        self.assertEqual(next(iterator)["event"],"search_progress")
+        while next(iterator)["event"] != "search_results":
+            pass
         iterator.close()
         with self.db.connection() as db:
             row = db.execute("SELECT * FROM search_tasks").fetchone()
@@ -471,12 +483,13 @@ class SearchTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM vacancy_cards").fetchone()[0],1)
             self.assertEqual(db.execute("SELECT count(*) FROM vacancy_tags").fetchone()[0],1)
 
-    def test_shared_collection_cap_includes_cached_candidates(self):
+    def test_source_collection_cap_is_independent_of_cached_candidates(self):
         self.run_search()
         self.client.target = 5
         self.source.items = [raw("101"),raw("102")]
         report = self.run_search(service=self.service(max_source_vacancies=2))
-        self.assertEqual(report["counts"]["found_count"],2)
+        self.assertEqual(report["counts"]["found_count"],3)
+        self.assertEqual(report["hh_counts"]["hh_discovered"],2)
         self.assertIn("SOURCE_LIMIT",report["stop_reason"])
 
     def test_source_change_invalidates_assessments_in_other_contexts(self):

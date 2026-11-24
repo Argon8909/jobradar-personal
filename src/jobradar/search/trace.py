@@ -14,7 +14,9 @@ class TaskTrace:
         self.path = database.path.parent / "search-diagnostics" / f"task-{task_id}.json"
         self.data = {"task_id":task_id,"metrics":{"analysis_attempts":0,"analysis_succeeded":0,
             "analysis_failed":0,"cache_hits":0,"reassessments":0,"repair_requests":0,
-            "tag_warnings":0,"source_skipped":0,"duplicate_skipped":0},"issues":[]}
+            "tag_warnings":0,"source_skipped":0,"duplicate_skipped":0,
+            "hh_discovered":0,"hh_duplicates":0,"hh_read":0,"hh_saved":0,"hh_incomplete":0,
+            "local_candidates":0,"filtered":0,"deferred":0,"visible_results":0},"issues":[]}
         self.context = {}
         self.options = settings.values.get("diagnostics",{}) if settings else {}
         self.llm_options = {key:value for key,value in settings.values["llm"].items() if key in ("provider","model","temperature","max_tokens","timeout_seconds")} if settings else {}
@@ -125,7 +127,8 @@ def attach_diagnostics(report, trace):
     report["diagnostics"] = trace
     issues = trace.get("issues",[]) if trace else []
     for item in report.get("unassessed",[]):
-        matching = [issue for issue in issues if issue.get("vacancy_id") == item["vacancy_id"] and issue.get("severity") == "error"]
+        matching = [issue for issue in issues if issue.get("vacancy_id") == item["vacancy_id"] and
+                    (issue.get("severity") == "error" or issue.get("stage") == "deferred")]
         if matching:
             error = matching[-1]
             item.update(reason=error["message"],error_code=error["code"],stage=error.get("stage"),path=error.get("path"))

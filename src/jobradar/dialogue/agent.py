@@ -256,7 +256,10 @@ class DialogueAgent:
                 self._capture_proposal(answer, state, prompt)
             if self.pending:
                 answer = "Предлагаю: " + self._describe(self.pending["name"], self.pending["arguments"]) + "\nПодтверждаете?"
-            answer = "\n".join(notices + [answer])
+            # SearchService already presents the evaluated selection. A second
+            # free-form listing from the dialogue model duplicates vacancies.
+            searched = any(item["name"] == "search_vacancies" and item["result"]["status"] == "success" for item in results)
+            answer = "\n".join(notices + ([answer] if not searched or errors or self.pending else []))
         except LLMError as exc:
             answer = "\n".join(notices + [str(exc)])
             self.pending = None
