@@ -404,7 +404,7 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(self.manager.get_state(),before)
         with self.db.connection() as db:
             plan = json.loads(db.execute("SELECT search_queries FROM search_tasks").fetchone()[0])
-            self.assertEqual(set(plan),{"version","queries"})
+        self.assertEqual(set(plan),{"version","queries","publication_period"})
 
     def test_results_and_details_are_context_scoped(self):
         service = self.service(); report = self.run_search(service=service)

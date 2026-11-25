@@ -13,6 +13,7 @@ from jobradar.storage.chat import ChatHistory
 from jobradar.tools.dispatcher import ToolDispatcher, canonical, failure
 from jobradar.tools.registry import DEFINITIONS, READ_ONLY, definitions
 from .presentation import completed, describe, short_confirmation
+from jobradar.search.trace import search_explanation
 
 INTENT_SCHEMA = {
     "type":"object", "additionalProperties":False,
@@ -52,7 +53,12 @@ class DialogueAgent:
                     "тогда само предложение не дублируй в actions. При смене темы same_topic=false. "
                     "explain_search=true если пользователь просит объяснить результаты, пропуски, ошибки или причины неоценённых вакансий прошлого поиска. "
                     "Сам вопрос о причинах не означает запрос нового поиска; не включай search_vacancies в actions без явной команды искать. "
-                    "Факты о квалификации сохраняй только по явному намерению пользователя.",
+                    "Факты о квалификации сохраняй только по явному намерению пользователя. "
+                    "Новое название роли не требует нового профиля/контекста. Разовый период, география или направление "
+                    "передаются в request search_vacancies без update_context. Постоянный период сохраняется только "
+                    "по явному указанию в дальнейшем/всегда через restrictions: "
+                    "{attribute:publication_period,operator:within,value:days:14 (либо weeks:N, months:N, unlimited, default)}. "
+                    "Не стирай остальные условия; не заменяй полное предложение вариантом только с названием.",
             "user_message":text, "state":state, "pending_proposal":pending,
             "recent_dialogue":self.history.dialogue_messages(12),
             "field_purposes":FIELD_PURPOSES,
@@ -174,7 +180,7 @@ class DialogueAgent:
             grants = self._intent(text, state, prompt)
             if self._explain_search:
                 report = self.dispatcher.search_diagnostics(state)
-                answer = (f"В поиске #{report['task_id']} найдено {report['counts']['found_count']}, оценено {report['counts']['evaluated_count']}. Подробный разбор доступен в панели диагностики." if report else "В активном контексте ещё нет сохранённого поиска, причины которого можно разобрать.")
+                answer = (search_explanation(report) if report else "В активном контексте ещё нет сохранённого поиска, причины которого можно разобрать.")
                 return (yield from self._finish(answer,[]))
             if self._confirmed_proposal:
                 self.pending = self._confirmed_proposal

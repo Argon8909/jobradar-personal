@@ -1,12 +1,15 @@
 """Conservative checks for proven hard-filter conflicts."""
 
 import re
+from .period import date_state
 
 
-def preliminary_mismatch(raw, criteria, card=None):
+def preliminary_mismatch(raw, criteria, card=None, period=None):
     """Shared gate before any paid operation. Missing evidence never means no."""
     if raw.get("status") in ("closed","archived"):
         return "Объявление подтверждённо закрыто."
+    if period and date_state(raw,period) == "excluded":
+        return "Дата публикации вне выбранного периода."
     if card is not None:
         return hard_mismatch(card,criteria)
     # Only an explicit, standalone field is proof. Mentions of an office in

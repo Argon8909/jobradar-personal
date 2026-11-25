@@ -12,6 +12,7 @@ from jobradar.storage import vacancies as repository
 from .contracts import ASSESSMENT, CARD, EXTRACTION, PLANNER_OUTPUT, RESOLUTION, TAG
 from .errors import AnalysisError
 from jobradar.search.budget import SearchStop
+from jobradar.search.period import assessment_criteria, validate_period
 
 
 class StructuredLLM:
@@ -88,6 +89,14 @@ class SearchPlanner:
         output = self.llm.call("search_planner",{
             "profile":state["profile"]["profile_data"],"criteria":state["context"]["criteria"],
             "request":request,"sources":list(sources),"supported_filters":["areas","work_formats"]},PLANNER_OUTPUT)
+        override = output.get("publication_period")
+        if override is not None:
+            try:
+                if not request or override["evidence"] not in request:
+                    raise ValueError("Период не подтверждён текущим запросом.")
+                validate_period({key:override[key] for key in ("unit","value")})
+            except ValueError as error:
+                raise SearchStop("PERIOD_CLARIFICATION",str(error)) from None
         plan = output["search_queries"]
         criteria = state["context"]["criteria"]
         resolutions = {item["input"].strip().casefold():item for item in output.get("resolved_locations",[])}
@@ -118,6 +127,8 @@ class SearchPlanner:
             # Algorithm 1.0 selects only keywords and areas by default. The
             # adapter retains work_formats support for explicit future policies.
             # Model-proposed source options never override this server policy.
+            if any(name.strip().isdecimal() for name in query["areas"]):
+                raise SearchStop("LOCATION_CLARIFICATION","Укажите названия стран или городов, а не числовые HH-ID.")
             query["filters"] = {}
         plan["queries"].sort(key=lambda query:query.get("priority",0))
         return output
@@ -135,7 +146,7 @@ class VacancyAnalyzer:
         envelope["properties"]["tags"]["items"] = {}
         result = self.llm.call("vacancy_analyzer",{
             "mode":"extract_and_assess","vacancy":vacancy,
-            "profile":state["profile"]["profile_data"],"criteria":state["context"]["criteria"],"request":request},EXTRACTION,
+            "profile":state["profile"]["profile_data"],"criteria":assessment_criteria(state["context"]["criteria"]),"request":request},EXTRACTION,
             validation_schema=envelope,check=self._check_card)
         valid = []
         for index,tag in enumerate(result["tags"]):
@@ -165,7 +176,7 @@ class VacancyAnalyzer:
         return self.llm.call("vacancy_analyzer",{
             "mode":"assessment_only","task":"Оцени сохранённую карточку; не извлекай её заново.",
             "card":card,"tags":tags,"profile":state["profile"]["profile_data"],
-            "criteria":state["context"]["criteria"],"request":request},ASSESSMENT)
+            "criteria":assessment_criteria(state["context"]["criteria"]),"request":request},ASSESSMENT)
 
 
 class TagResolver:

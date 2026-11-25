@@ -189,6 +189,39 @@ class BrowserChatTests(unittest.TestCase):
         self.assertEqual(vacancy.title,"Системный аналитик")
         self.assertIn("REST API & JSON",vacancy.description)
 
+    def test_publication_date_jsonld_offsets_fallbacks_and_diagnostics_panel(self):
+        from jobradar.sources.hh import extract
+        from jobradar.profiles import ProfileManager
+        from jobradar.search.service import SearchService
+        from jobradar.events import collect
+        from dataclasses import replace
+        from datetime import datetime, timezone, timedelta
+        from test_search import FixtureLLM, FixtureSource, raw
+        template = '<h1>Аналитик</h1><div data-qa="vacancy-description">SQL</div>'
+        for date,expected in [('2026-03-01T01:00:00+03:00','2026-02-28T22:00:00+00:00'),
+                              ('2026-03-01','2026-02-28T21:00:00+00:00'),('bad',None)]:
+            payload={'@graph':[{'@type':['JobPosting'],'datePosted':date}]}
+            self.page.set_content(template+'<script type="application/ld+json">'+json.dumps(payload)+'</script>')
+            self.assertEqual(extract(self.page,'123').published_at,expected)
+        self.page.set_content(template+'<meta itemprop="datePosted" content="2026-03-01T01:00:00Z">')
+        self.assertEqual(extract(self.page,'123').published_at,'2026-03-01T01:00:00+00:00')
+        self.page.set_content(template+'<time data-qa="vacancy-publication-date" datetime="2026-03-01"></time>')
+        self.assertEqual(extract(self.page,'123').published_at,'2026-02-28T21:00:00+00:00')
+        self.page.set_content(template+'<meta itemprop="dateModified" content="2026-03-01">')
+        self.assertIsNone(extract(self.page,'123').published_at)
+        # Same session as the UI; render actual diagnostic data through Flask.
+        with self.db.connection() as db:
+            session_id=db.execute('select id from user_sessions order by id desc limit 1').fetchone()[0]
+        manager=ProfileManager(self.db,1,session_id);manager.create_profile('Аналитик',authorized=True)
+        old=(datetime.now(timezone.utc)-timedelta(days=60)).isoformat()
+        service=SearchService(self.db,load_settings(ROOT/'config/v0.2.json'),FixtureLLM(),{'hh':FixtureSource([replace(raw('100'),published_at=old),raw('101')])})
+        report=collect(service.search(manager,{},manager.get_state()))
+        self.page.goto(f'http://127.0.0.1:{self.server.server_port}/diagnostics')
+        expect(self.page.locator('#summary')).to_contain_text('30 календарных дней')
+        expect(self.page.locator('#summary')).to_contain_text('источник: конфигурация')
+        expect(self.page.locator('#summary')).to_contain_text('Исключено по возрасту: 1')
+        expect(self.page.locator('#summary')).to_contain_text('Дата публикации неизвестна: 1')
+
     def test_hh_preserves_format_filter_and_deduplicates_across_queries(self):
         from urllib.parse import parse_qs,urlparse
         from jobradar.sources.hh import HHAdapter

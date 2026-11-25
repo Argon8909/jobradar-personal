@@ -15,8 +15,9 @@ def encode(data):
 
 def upsert_raw(db, raw):
     values = {key:getattr(raw,key) for key in ("source","external_id","url","title","employer","description","published_at")}
-    digest = hashlib.sha256(encode(values).encode()).hexdigest()
-    previous = db.execute("SELECT id,content_hash FROM vacancies WHERE source=? AND external_id=?",
+    # Publication metadata is an eligibility fact, not extracted card content.
+    digest = hashlib.sha256(encode({k:v for k,v in values.items() if k != "published_at"}).encode()).hexdigest()
+    previous = db.execute("SELECT * FROM vacancies WHERE source=? AND external_id=?",
                           (raw.source,raw.external_id)).fetchone()
     stamp = now()
     if not raw.description:
@@ -29,16 +30,21 @@ def upsert_raw(db, raw):
                           (raw.source,raw.external_id,raw.url,raw.title,raw.employer,stamp,stamp)).lastrowid
     if previous:
         vacancy_id = previous["id"]
+        if all(previous[key] == value for key,value in values.items() if key != "published_at"):
+            # Retain legacy date-inclusive hashes when substantive facts are
+            # unchanged. No mass migration and no promotion of stale cards.
+            digest = previous["content_hash"] or digest
+        published_at = raw.published_at or previous["published_at"]
         db.execute("UPDATE vacancies SET url=?,title=?,employer=?,description=?,content_hash=?,published_at=?,"
-                   "status='available',last_seen_at=?,fetched_at=? WHERE id=?",
-                   (raw.url,raw.title,raw.employer,raw.description,digest,raw.published_at,stamp,stamp,vacancy_id))
+                   "status='available',last_seen_at=?,fetched_at=?,last_checked_at=? WHERE id=?",
+                   (raw.url,raw.title,raw.employer,raw.description,digest,published_at,stamp,stamp,stamp,vacancy_id))
         if previous["content_hash"] != digest:
             db.execute("UPDATE context_vacancies SET profile_revision=NULL,criteria_revision=NULL WHERE vacancy_id=?",(vacancy_id,))
     else:
         vacancy_id = db.execute("INSERT INTO vacancies(source,external_id,url,title,employer,description,content_hash,"
-                                "status,published_at,first_seen_at,last_seen_at,fetched_at) VALUES (?,?,?,?,?,?,?,'available',?,?,?,?)",
+                                "status,published_at,first_seen_at,last_seen_at,fetched_at,last_checked_at) VALUES (?,?,?,?,?,?,?,'available',?,?,?,?,?)",
                                 (raw.source,raw.external_id,raw.url,raw.title,raw.employer,raw.description,digest,
-                                 raw.published_at,stamp,stamp,stamp)).lastrowid
+                                 raw.published_at,stamp,stamp,stamp,stamp)).lastrowid
     return vacancy_id
 
 

@@ -79,6 +79,14 @@ def criteria_lines(data):
         if key in data:
             lines.append(label + ": " + ("; ".join(attributes.get(item["attribute"],text(item["attribute"])) + " — " +
                          operations.get(item["operator"],text(item["operator"])) + ": " + text(item["value"]) for item in data[key]) or "нет"))
+    from jobradar.search.period import stored_period, period_label
+    period = stored_period(data)
+    if period:
+        lines = [line for line in lines if not line.startswith("Ограничения:")]
+        others = [item for item in data.get("restrictions",[]) if item["attribute"] != "publication_period"]
+        if others:
+            lines.append("Ограничения: " + "; ".join(text(item["attribute"]) + " — " + text(item["operator"]) + ": " + text(item["value"]) for item in others))
+        lines.append("Период публикации: " + ("стандартный из конфигурации" if period["unit"] == "default" else period_label(period)))
     return lines
 
 

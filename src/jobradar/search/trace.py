@@ -16,7 +16,8 @@ class TaskTrace:
             "analysis_failed":0,"cache_hits":0,"reassessments":0,"repair_requests":0,
             "tag_warnings":0,"source_skipped":0,"duplicate_skipped":0,
             "hh_discovered":0,"hh_duplicates":0,"hh_read":0,"hh_saved":0,"hh_incomplete":0,
-            "local_candidates":0,"filtered":0,"deferred":0,"visible_results":0},"issues":[]}
+            "local_candidates":0,"filtered":0,"deferred":0,"visible_results":0,
+            "age_excluded":0,"unknown_publication_date":0,"availability_unconfirmed":0},"issues":[]}
         self.context = {}
         self.options = settings.values.get("diagnostics",{}) if settings else {}
         self.llm_options = {key:value for key,value in settings.values["llm"].items() if key in ("provider","model","temperature","max_tokens","timeout_seconds")} if settings else {}
@@ -157,3 +158,43 @@ def explanation(report):
     if report.get("stop_reason"):
         lines.append("Причина завершения: " + report["stop_reason"])
     return "\n".join(lines)
+
+
+def search_explanation(report):
+    """A factual user answer, never model-generated guesses or raw error logs."""
+    trace = report.get("diagnostics") or {}
+    counts = trace.get("final_counts") or report["counts"]
+    metrics = trace.get("metrics", {})
+    lines = [f"В поиске #{report['task_id']} найдено {counts['found_count']}, оценено {counts['evaluated_count']}."]
+    if not trace:
+        lines.append("Подробная диагностика не сохранена; точные причины установить нельзя.")
+        return " ".join(lines)
+    if "filtered" in metrics:
+        lines.append(f"Отфильтровано: {metrics['filtered']}; отложено: {metrics.get('deferred',0)}. Ранжирование само по себе вакансии не исключает.")
+    plan = trace.get("search_plan") or report.get("search_plan") or {}
+    if plan.get("queries"):
+        lines.append("Запросы: " + "; ".join(q["text"] + (" — " + ", ".join(q["areas"]) if q.get("areas") else "") for q in plan["queries"]) + ".")
+    period = trace.get("publication_period")
+    if period:
+        from .period import period_label
+        lines.append("Период публикации: " + period_label(period) + f". По возрасту исключено: {metrics.get('age_excluded',0)}; неизвестная дата: {metrics.get('unknown_publication_date',0)}.")
+    coverage = trace.get("coverage")
+    if coverage:
+        stages = {"cards":"готовые карточки","raw":"сохранённые исходники","source":"этап сбора HH"}
+        lines.append("Завершённые этапы: " + (", ".join(stages.get(s,s) for s in coverage["stages_completed"]) or "нет") + ".")
+        lines.append(f"Запросов завершено: {coverage['completed_queries']}/{coverage['planned_queries']}; " + ("охват источника неполный." if not coverage["source_complete"] else "запланированные запросы выполнены."))
+    reason = trace.get("stop_reason") or report.get("stop_reason")
+    descriptions = {"SOURCE_LIMIT":"достигнут лимит сбора HH", "ANALYSIS_LIMIT":"достигнут лимит новых анализов",
+                    "LLM_LIMIT":"достигнут бюджет модели", "TIMEOUT":"истекло время поиска",
+                    "RESULTS_EXHAUSTED":"цель по числу результатов не достигнута", "CAPTCHA":"HH запросил ручную проверку",
+                    "CONTEXT_CHANGED":"изменился поисковый контекст", "INTERRUPTED":"поиск прерван",
+                    "LLM_JSON_INVALID":"модель вернула некорректные данные", "LLM_SCHEMA_INVALID":"модель нарушила формат данных",
+                    "AREA_UNSUPPORTED":"регион не удалось выбрать на HH", "LOCATION_CLARIFICATION":"требуется уточнить географию",
+                    "PERIOD_CLARIFICATION":"требуется уточнить период", "SOURCE_INCOMPLETE":"часть исходников прочитана не полностью"}
+    if reason:
+        codes = list(dict.fromkeys(item.strip().split(":",1)[0] for item in reason.split(";")))
+        lines.append("Причины и ограничения: " + "; ".join(dict.fromkeys(descriptions.get(c,"зафиксирован сбой обработки; подробности в диагностике") for c in codes)) + ".")
+    else:
+        lines.append("Запланированная обработка завершилась без зафиксированной причины ограничения.")
+    lines.append("Подробный разбор доступен в панели диагностики.")
+    return " ".join(lines)

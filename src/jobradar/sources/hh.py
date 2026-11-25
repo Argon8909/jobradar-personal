@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from playwright.sync_api import Error as BrowserError, TimeoutError as BrowserTimeout, sync_playwright
 
 from .base import RawVacancy, SourceError, SourceEvent
+from jobradar.search.period import normalize_date
 
 _browser_lock = threading.Lock()
 AREA_IDS = {"россия":"113","москва":"1","санкт-петербург":"2","казань":"88",
@@ -112,7 +113,19 @@ def extract(page, external_id):
         if value and value not in metadata:
             metadata.append(value)
     original = "\n\n".join([title,*([employer] if employer else []),*metadata,description])
-    return RawVacancy("hh",str(external_id),f"https://hh.ru/vacancy/{external_id}",title,employer,original)
+    published_at = normalize_date(fallback.get("datePosted"))
+    if not published_at:
+        # Machine-readable publication fields only; never a page-modified date,
+        # download time, arbitrary date in duties or a guessed relative label.
+        for selector,attribute in (('[itemprop="datePosted"]',"content"),
+                                   ('[itemprop="datePosted"]',"datetime"),
+                                   ('time[data-qa="vacancy-publication-date"]',"datetime")):
+            locator = page.locator(selector).first
+            if locator.count():
+                published_at = normalize_date(locator.get_attribute(attribute))
+                if published_at:
+                    break
+    return RawVacancy("hh",str(external_id),f"https://hh.ru/vacancy/{external_id}",title,employer,original,published_at)
 
 
 class HHAdapter:
@@ -217,6 +230,8 @@ class HHAdapter:
 
     def _area(self, context, name, deadline):
         normalized = " ".join(name.split()).casefold()
+        if normalized.isdecimal():
+            raise SourceError("AREA_UNSUPPORTED","Укажите название региона HH.ru, а не числовой идентификатор.")
         if normalized in self.areas:
             return self.areas[normalized]
         page = context.new_page()

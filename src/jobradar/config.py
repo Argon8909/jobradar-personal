@@ -22,6 +22,26 @@ def load_settings(path: str | Path) -> Settings:
     if not isinstance(values, dict):
         raise ValueError("Configuration must be a JSON object")
 
+    # Explicit opt-in: v0.1's inline search section remains supported unchanged.
+    if "search_config" in values:
+        if "search" in values:
+            raise ValueError("Use search_config or search, not both")
+        search_path = values["search_config"]
+        if not isinstance(search_path,str) or not search_path.strip():
+            raise ValueError("search_config must be a nonempty path")
+        search_path = (config_path.parent / Path(search_path).expanduser()).resolve()
+        try:
+            values["search"] = json.loads(search_path.read_text(encoding="utf-8-sig"))
+        except (OSError,ValueError) as error:
+            raise ValueError(f"Cannot load search_config {search_path}: {error}") from error
+        required_search = {"max_source_vacancies","max_new_analyses","max_llm_calls",
+                           "deadline_seconds","target_count","vacancy_max_age_days"}
+        if not isinstance(values["search"],dict) or set(values["search"]) != required_search:
+            raise ValueError("search_config must contain exactly: " + ", ".join(sorted(required_search)))
+        for key in required_search - {"vacancy_max_age_days"}:
+            if type(values["search"][key]) is not int or values["search"][key] <= 0:
+                raise ValueError(f"search_config.{key} must be a positive integer")
+
     required = {
         "database": ("path", "busy_timeout_ms"),
         "llm": ("provider", "model", "base_url", "temperature", "timeout_seconds"),
@@ -69,6 +89,9 @@ def load_settings(path: str | Path) -> Settings:
             raise ValueError(f"{section}.{key} must be a positive integer")
     if "hh" in values and (not isinstance(values["hh"],dict) or type(values["hh"].get("headless",False)) is not bool):
         raise ValueError("hh.headless must be a boolean")
+    age = values["search"].get("vacancy_max_age_days")
+    if age is not None and (type(age) is not int or not 1 <= age <= 36500):
+        raise ValueError("search.vacancy_max_age_days must be null or an integer between 1 and 36500")
     for section,key in (("hh","manual_action_timeout_seconds"),("source","content_timeout_seconds")):
         value = values.get(section,{}).get(key)
         if value is not None and (type(value) is not int or value <= 0):

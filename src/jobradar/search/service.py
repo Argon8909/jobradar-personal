@@ -11,9 +11,11 @@ from jobradar.llm.client import LLMError
 from jobradar.profiles import ProfileError
 from jobradar.sources.base import SourceError, SourceEvent
 from jobradar.storage import search as tasks, vacancies
+from jobradar.storage.profiles import now
 from .budget import SearchStop, TaskBudget
 from .filters import hard_mismatch, preliminary_mismatch, candidate_priority
 from .trace import TaskTrace, attach_diagnostics
+from .period import resolve_period, date_state, period_label, availability_observed
 
 class SearchService:
     def __init__(self, database, settings, client, sources, *, budget_factory=TaskBudget):
@@ -46,6 +48,9 @@ class SearchService:
         trace.prune()
         structured = StructuredLLM(self.client,self.settings,budget,observer=trace.issue,recorder=trace)
         planner, analyzer, resolver = SearchPlanner(structured), VacancyAnalyzer(structured), TagResolver(self.database,structured)
+        period = resolve_period(state["context"]["criteria"],limits,trace.data["started_at"])
+        trace.data["publication_period"] = period
+        age_excluded, unknown_dates, availability_unknown = set(),set(),set()
         processed, attempted, filtered, deferred = set(), set(), set(), set()
         discovered, adapter_seen, read_keys = set(), set(), set()
         coverage = {"planned_queries":0,"completed_queries":0,"source_complete":False,
@@ -77,14 +82,22 @@ class SearchService:
                 card = vacancies.get_card(db,vacancy_id)
                 assessment = vacancies.get_assessment(db,state["active_context_id"],vacancy_id)
                 tags = vacancies.get_tags(db,vacancy_id)
-            key = (vacancy_id,raw["content_hash"],analyzer.VERSION,raw["status"])
+            key = (vacancy_id,raw["content_hash"],analyzer.VERSION,raw["status"],raw["published_at"])
             if key in attempted:
                 trace.count("duplicate_skipped")
                 return
             attempted.add(key)
             processed.discard(vacancy_id); filtered.discard(vacancy_id); deferred.discard(vacancy_id)
             current = vacancies.card_current(raw,card,analyzer.VERSION)
-            mismatch = preliminary_mismatch(raw,state["context"]["criteria"],card if current else None)
+            age_excluded.discard(vacancy_id); unknown_dates.discard(vacancy_id); availability_unknown.discard(vacancy_id)
+            age_state = date_state(raw,period)
+            if age_state == "unknown":
+                unknown_dates.add(vacancy_id)
+            if age_state == "excluded" and raw["status"] not in ("closed","archived"):
+                age_excluded.add(vacancy_id)
+            if raw["status"] not in ("closed","archived") and not availability_observed(raw,period):
+                availability_unknown.add(vacancy_id)
+            mismatch = preliminary_mismatch(raw,state["context"]["criteria"],card if current else None,period)
             if mismatch:
                 reject(vacancy_id,mismatch)
                 return
@@ -145,6 +158,8 @@ class SearchService:
                 metrics = trace.data["metrics"]
                 metrics["analysis_failed"] = metrics["analysis_attempts"] - metrics["analysis_succeeded"]
                 metrics["filtered"], metrics["deferred"] = len(filtered),len(deferred)
+                metrics.update(age_excluded=len(age_excluded),unknown_publication_date=len(unknown_dates),
+                               availability_unconfirmed=len(availability_unknown))
                 trace.save()
 
         def progress():
@@ -188,7 +203,12 @@ class SearchService:
         try:
             yield {"event":"search_started","data":{"task_id":task_id,"message":"Поиск запущен"}}
             output = planner.plan(state,request,self.sources)
+            override = output.get("publication_period")
+            period = resolve_period(state["context"]["criteria"],limits,trace.data["started_at"],
+                                    {key:override[key] for key in ("unit","value")} if override else None)
+            trace.data["publication_period"] = period
             plan = output["search_queries"]
+            plan["publication_period"] = period
             trace.data["search_plan"] = plan
             coverage["planned_queries"] = len(plan["queries"])
             target = output["target_count"] or target
@@ -298,7 +318,7 @@ class SearchService:
             if visible < target:
                 reasons.append("RESULTS_EXHAUSTED: цель по количеству не достигнута")
         except (SearchStop,SourceError) as exc:
-            if exc.code == "LOCATION_CLARIFICATION":
+            if exc.code in ("LOCATION_CLARIFICATION","PERIOD_CLARIFICATION"):
                 clarification = str(exc)
             elif exc.code == "AREA_UNSUPPORTED":
                 clarification = "Уточните конкретные страны или города поиска: один из регионов не удалось выбрать на HH.ru."
@@ -321,6 +341,9 @@ class SearchService:
                 iterator.close()
         reason = "; ".join(dict.fromkeys(reasons)) or None
         failed = bool(not processed and reason and not all(item.startswith("RESULTS_EXHAUSTED") for item in reasons))
+        # SQLite's completed/non-partial state requires a NULL stop_reason.
+        # Retain the target shortfall in the diagnostic trace instead.
+        diagnostic_reason = reason
         if not processed and not failed:
             reason = None
         with self.database.transaction() as db:
@@ -328,6 +351,9 @@ class SearchService:
             report = tasks.results(db,state,task_id,self.settings.values["results"]["default_limit"])
         trace.data["metrics"]["analysis_failed"] = trace.data["metrics"]["analysis_attempts"] - trace.data["metrics"]["analysis_succeeded"]
         trace.data["metrics"]["visible_results"] = report["result_count"]
+        trace.data["metrics"].update(report["eligibility_counts"])
+        trace.data["stop_reason"] = diagnostic_reason
+        trace.data["final_counts"] = {**report["counts"],"result_count":report["result_count"],"filtered_count":report["filtered_count"]}
         trace.save()
         attach_diagnostics(report,trace.data)
         report.update(clarification=clarification,coverage=coverage)
@@ -355,6 +381,10 @@ class SearchService:
                 lines.append("Источник просмотрен не полностью.")
         if report.get("clarification"):
             lines.append(report["clarification"])
+        if report.get("publication_period"):
+            lines.append("Период публикации: " + period_label(report["publication_period"]) + ".")
+            if report["result_count"] < report["target_count"] and report["publication_period"].get("cutoff"):
+                lines.append("Можно увеличить период поиска, если нужны дополнительные варианты.")
         if report.get("unassessed_count") or report["status"] == "failed":
             lines.append("Подробности доступны в отдельной панели диагностики.")
         for index,item in enumerate(report["vacancies"],1):
@@ -380,7 +410,7 @@ class SearchService:
             result["completed_at"] = current["completed_at"]
         return attach_diagnostics(result,TaskTrace.load(self.database,result["task_id"]))
 
-    def _refresh_assessments(self, manager, state, ids, trace=None):
+    def _refresh_assessments(self, manager, state, ids, trace=None, period=None):
         budget = self.budget_factory(self.settings)
         analyzer = VacancyAnalyzer(StructuredLLM(self.client,self.settings,budget,observer=trace.issue if trace else None,recorder=trace))
         warnings = []
@@ -394,7 +424,7 @@ class SearchService:
                     card = vacancies.get_card(db,vacancy_id)
                     old = vacancies.get_assessment(db,state["active_context_id"],vacancy_id)
                     tags = vacancies.get_tags(db,vacancy_id)
-                if not vacancies.card_current(raw,card,analyzer.VERSION) or preliminary_mismatch(raw,state["context"]["criteria"],card):
+                if not vacancies.card_current(raw,card,analyzer.VERSION) or preliminary_mismatch(raw,state["context"]["criteria"],card,period):
                     continue
                 if not tasks.assessment_current(raw,card,old,state):
                     if trace:
@@ -428,7 +458,8 @@ class SearchService:
             ids = [row[0] for row in db.execute("SELECT vacancy_id FROM task_vacancies WHERE task_id=? ORDER BY vacancy_id LIMIT ?",
                                                (task["id"],self.settings.values["search"]["max_source_vacancies"]))]
         trace = TaskTrace.existing(self.database,task["id"],self.settings)
-        warnings = yield from self._refresh_assessments(manager,state,ids,trace)
+        period = json.loads(task["search_queries"] or "{}").get("publication_period")
+        warnings = yield from self._refresh_assessments(manager,state,ids,trace,period)
         with self.database.transaction() as db:
             result = tasks.results(db,state,task["id"],limit)
         attach_diagnostics(result,TaskTrace.load(self.database,task["id"]))
@@ -442,7 +473,9 @@ class SearchService:
             task = db.execute("SELECT st.id FROM search_tasks st JOIN task_vacancies tv ON tv.task_id=st.id WHERE st.context_id=? AND tv.vacancy_id=? ORDER BY st.id DESC LIMIT 1",
                               (state["active_context_id"],arguments["vacancy_id"])).fetchone()
         trace = TaskTrace.existing(self.database,task["id"],self.settings) if task else None
-        warnings = yield from self._refresh_assessments(manager,state,[arguments["vacancy_id"]],trace)
+        period = (trace.data.get("publication_period") if trace else None) or resolve_period(
+            state["context"]["criteria"],self.settings.values["search"],now())
+        warnings = yield from self._refresh_assessments(manager,state,[arguments["vacancy_id"]],trace,period)
         with self.database.transaction() as db:
             result = tasks.details(db,state,arguments["vacancy_id"])
         result["warnings"] = warnings

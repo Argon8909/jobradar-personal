@@ -6,6 +6,7 @@ from jobradar.profiles.contracts import ProfileError
 from .profiles import now
 from . import vacancies
 from jobradar.search.filters import preliminary_mismatch
+from jobradar.search.period import date_state, availability_observed
 
 
 def create_task(db, state, goal, target_count):
@@ -60,7 +61,9 @@ def vacancy_view(db, vacancy_id, state, *, details=False):
     card = vacancies.get_card(db,vacancy_id)
     assessment = vacancies.get_assessment(db,state["active_context_id"],vacancy_id)
     view = {"vacancy_id":vacancy_id,"title":vacancy["title"],"employer":vacancy["employer"],"url":vacancy["url"],
-            "status":vacancy["status"],
+            "status":vacancy["status"],"published_at":vacancy["published_at"],
+            "last_checked_at":vacancy["last_checked_at"],
+            "availability":"closed" if vacancy["status"] in ("closed","archived") else "unconfirmed",
             "summary":card.get("summary") if card else None,"assessment":assessment,
             "assessment_is_current":assessment_current(vacancy,card,assessment,state),
             "source_checked_at":vacancy["fetched_at"]}
@@ -71,22 +74,32 @@ def vacancy_view(db, vacancy_id, state, *, details=False):
 
 def results(db, state, task_id=None, limit=20):
     current = task(db,state["active_context_id"],task_id)
+    period = json.loads(current["search_queries"] or "{}").get("publication_period")
     ids = [row[0] for row in db.execute(
         "SELECT tv.vacancy_id FROM task_vacancies tv LEFT JOIN context_vacancies cv "
         "ON cv.vacancy_id=tv.vacancy_id AND cv.context_id=? WHERE tv.task_id=? "
         "ORDER BY (cv.profile_revision=? AND cv.criteria_revision=?) DESC,cv.relevance_score DESC,tv.vacancy_id LIMIT ?",
         (state["active_context_id"],current["id"],state["profile"]["revision"],state["context"]["criteria_revision"],1000))]
     eligible = []
+    age_excluded, unknown_dates, unconfirmed = 0,0,0
     for vid in ids:
         raw, card = vacancies.get_raw(db,vid), vacancies.get_card(db,vid)
-        if not preliminary_mismatch(raw,state["context"]["criteria"],card if vacancies.card_current(raw,card) else None):
+        age = date_state(raw,period)
+        age_excluded += int(age == "excluded" and raw["status"] not in ("closed","archived"))
+        unknown_dates += int(age == "unknown")
+        unconfirmed += int(raw["status"] not in ("closed","archived") and not availability_observed(raw,period,current["completed_at"]))
+        if not preliminary_mismatch(raw,state["context"]["criteria"],card if vacancies.card_current(raw,card) else None,period):
             eligible.append(vid)
     views = [vacancy_view(db,vid,state) for vid in eligible]
+    for view in views:
+        if availability_observed(view,period,current["completed_at"]):
+            view["availability"] = "observed_during_search"
     evaluated = [view for view in views if view["assessment_is_current"]]
     visible = evaluated
     unassessed = [{"vacancy_id":view["vacancy_id"],"title":view["title"],"url":view["url"],
                    "state":"stale" if view["assessment"] else "missing"} for view in views if not view["assessment_is_current"]]
-    return {"task_id":current["id"],"status":current["state"],"target_count":current["target_count"],"is_partial":bool(current["is_partial"]),
+    return {"publication_period":period,"eligibility_counts":{"age_excluded":age_excluded,
+            "unknown_publication_date":unknown_dates,"availability_unconfirmed":unconfirmed},"task_id":current["id"],"status":current["state"],"target_count":current["target_count"],"is_partial":bool(current["is_partial"]),
             "filtered_count":len(ids)-len(eligible),"result_count":len(visible),"unassessed_count":len(unassessed),"unassessed":unassessed,
             "stop_reason":current["stop_reason"],"vacancies":visible[:limit],
             "counts":counts(db,current["id"],state)}

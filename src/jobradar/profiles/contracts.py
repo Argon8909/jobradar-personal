@@ -31,7 +31,7 @@ def validate_profile_fields(data):
     """Enforce the documented profile/criteria boundary without changing JSON Schema."""
     criteria_keys = {"work_format_preference","work_format","work_formats","salary","salary_remote","salary_office",
                      "salary_min","salary_expectations","employment_type","employment_preference","relocation",
-                     "locations","location","geography","adjacent_roles","target_roles","preferences","restrictions"}
+                     "locations","location","geography","adjacent_roles","target_roles","preferences","restrictions","publication_period","vacancy_max_age_days"}
     for item in data.get("additional_attributes",[]):
         key = item["key"].strip().casefold()
         if key in criteria_keys or key.startswith("salary_"):
@@ -51,4 +51,10 @@ def validate(command: str, arguments: dict) -> dict:
     if error:
         path = ".".join(map(str, error.absolute_path)) or "arguments"
         raise ProfileError("VALIDATION_ERROR", f"Invalid field: {path}")
+    if command in ("create_context","update_context"):
+        from jobradar.search.period import stored_period
+        try:
+            stored_period(clean.get("criteria",{}) if command == "create_context" else clean["changes"])
+        except ValueError as exc:
+            raise ProfileError("VALIDATION_ERROR",str(exc)) from None
     return clean

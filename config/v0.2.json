@@ -1,0 +1,46 @@
+{
+  "database": {
+    "path": "../data/jobradar-v0.1.sqlite3",
+    "busy_timeout_ms": 15000
+  },
+  "prompts_dir": "../prompts",
+  "llm": {
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "base_url": "https://api.deepseek.com",
+    "temperature": 0.2,
+    "timeout_seconds": 60,
+    "max_tokens": 3200
+  },
+  "dialogue": {
+    "max_tool_calls": 20,
+    "max_llm_calls": 24
+  },
+  "hh": {
+    "headless": false,
+    "manual_action_timeout_seconds": 120
+  },
+  "source": {
+    "page_timeout_seconds": 30,
+    "content_timeout_seconds": 15
+  },
+  "retries": {
+    "max_safe_retries": 2,
+    "max_structural_repairs": 1
+  },
+  "results": {
+    "default_limit": 20,
+    "max_limit": 100
+  },
+  "diagnostics": {
+    "capture_llm": "errors",
+    "retention_days": 7,
+    "max_response_chars": 65536,
+    "max_file_bytes": 5242880
+  },
+  "web": {
+    "host": "127.0.0.1",
+    "port": 8765
+  },
+  "search_config": "search-v0.2.json"
+}

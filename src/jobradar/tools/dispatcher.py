@@ -70,7 +70,9 @@ class ToolDispatcher:
                 return failure("SOURCE_UNAVAILABLE", "Поиск и выдача вакансий ещё не подключены.")
             guarded = ProfileManager(self.manager.database, self.manager.user_id, self.manager.session_id,
                                      expected_context_id=expected_state["active_context_id"])
-            if name == "search_vacancies" and "request" not in arguments and request_text:
+            if name == "search_vacancies" and request_text:
+                # Use the actual turn, not a model summary that can lose a
+                # one-off period or resurrect conditions from older messages.
                 arguments = {**arguments,"request":request_text}
             data = handler(guarded, arguments, expected_state)
             if isinstance(data,GeneratorType):

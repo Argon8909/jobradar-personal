@@ -1,0 +1,8 @@
+{
+  "max_source_vacancies": 100,
+  "max_new_analyses": 30,
+  "deadline_seconds": 600,
+  "max_llm_calls": 100,
+  "target_count": 20,
+  "vacancy_max_age_days": 30
+}

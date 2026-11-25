@@ -6,6 +6,7 @@ from jobradar.storage import Database
 from jobradar.storage import profiles as repository
 
 from .contracts import ProfileError, validate, validate_profile_fields
+from jobradar.search.period import ATTRIBUTE, stored_period
 
 _UNSET = object()
 
@@ -156,6 +157,10 @@ class ProfileManager:
         arguments = validate("create_context", arguments)
         self._authorize(authorized)
         data = {**arguments.get("criteria", {}), "schema_version": 1}
+        try:
+            stored_period(data)
+        except ValueError as error:
+            raise ProfileError("VALIDATION_ERROR",str(error)) from None
         with self.database.transaction() as db:
             active = self._active(db)
             context_id = repository.create_context(db, active["profile_id"], name, data)
@@ -187,6 +192,15 @@ class ProfileManager:
             self._revision(active["criteria_revision"], expected_revision)
             old = json.loads(active["criteria"])
             updated = {**old, **changes}
+            # A period-only patch uses the existing extensible restriction list;
+            # preserve unrelated hard constraints even if the model omitted them.
+            items = changes.get("restrictions")
+            if items and all(item["attribute"] == ATTRIBUTE for item in items):
+                updated["restrictions"] = [item for item in old.get("restrictions",[]) if item["attribute"] != ATTRIBUTE] + items
+            try:
+                stored_period(updated)
+            except ValueError as error:
+                raise ProfileError("VALIDATION_ERROR",str(error)) from None
             if isinstance(changes.get("salary"), dict):
                 updated["salary"] = {**(old.get("salary") or {}), **changes["salary"]}
             fields = {key: updated[key] for key in changes if key not in old or updated[key] != old[key]}
