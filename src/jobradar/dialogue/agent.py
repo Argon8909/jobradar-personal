@@ -35,11 +35,14 @@ class DialogueAgent:
         self.history = ChatHistory(manager)
         self.pending = None
 
-    def _complete(self, messages, **kwargs):
+    def _consume_call(self):
         if self._llm_calls >= self.settings.values["dialogue"].get("max_llm_calls", 24):
             raise LLMError("Достигнут лимит обращений к модели для этого запроса.")
         self._llm_calls += 1
-        return self.client.complete(messages, **kwargs)
+
+    def _complete(self, messages, **kwargs):
+        self._consume_call()
+        return self.client.complete(messages, on_retry=self._consume_call, **kwargs)
 
     def _intent(self, text, state, prompt):
         pending = self.pending if self.pending and self.pending["state"] == state else None
@@ -54,7 +57,7 @@ class DialogueAgent:
                     "explain_search=true если пользователь просит объяснить результаты, пропуски, ошибки или причины неоценённых вакансий прошлого поиска. "
                     "Сам вопрос о причинах не означает запрос нового поиска; не включай search_vacancies в actions без явной команды искать. "
                     "Факты о квалификации сохраняй только по явному намерению пользователя. "
-                    "Новое название роли не требует нового профиля/контекста. Разовый период, география или направление "
+                    "Новое название роли не требует нового профиля/контекста. Разовый период или направление "
                     "передаются в request search_vacancies без update_context. Постоянный период сохраняется только "
                     "по явному указанию в дальнейшем/всегда через restrictions: "
                     "{attribute:publication_period,operator:within,value:days:14 (либо weeks:N, months:N, unlimited, default)}. "

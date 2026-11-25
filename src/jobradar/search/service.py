@@ -351,6 +351,7 @@ class SearchService:
             report = tasks.results(db,state,task_id,self.settings.values["results"]["default_limit"])
         trace.data["metrics"]["analysis_failed"] = trace.data["metrics"]["analysis_attempts"] - trace.data["metrics"]["analysis_succeeded"]
         trace.data["metrics"]["visible_results"] = report["result_count"]
+        trace.data["metrics"]["specialized_llm_calls"] = budget.calls
         trace.data["metrics"].update(report["eligibility_counts"])
         trace.data["stop_reason"] = diagnostic_reason
         trace.data["final_counts"] = {**report["counts"],"result_count":report["result_count"],"filtered_count":report["filtered_count"]}
@@ -455,8 +456,8 @@ class SearchService:
         with self.database.transaction() as db:
             manager._active(db)
             task = tasks.task(db,state["active_context_id"],arguments.get("task_id"))
-            ids = [row[0] for row in db.execute("SELECT vacancy_id FROM task_vacancies WHERE task_id=? ORDER BY vacancy_id LIMIT ?",
-                                               (task["id"],self.settings.values["search"]["max_source_vacancies"]))]
+            ids = [row[0] for row in db.execute("SELECT vacancy_id FROM task_vacancies WHERE task_id=? ORDER BY vacancy_id",
+                                               (task["id"],))]
         trace = TaskTrace.existing(self.database,task["id"],self.settings)
         period = json.loads(task["search_queries"] or "{}").get("publication_period")
         warnings = yield from self._refresh_assessments(manager,state,ids,trace,period)
@@ -470,10 +471,10 @@ class SearchService:
         with self.database.transaction() as db:
             manager._active(db)
             tasks.details(db,state,arguments["vacancy_id"])
-            task = db.execute("SELECT st.id FROM search_tasks st JOIN task_vacancies tv ON tv.task_id=st.id WHERE st.context_id=? AND tv.vacancy_id=? ORDER BY st.id DESC LIMIT 1",
+            task = db.execute("SELECT st.id,st.search_queries FROM search_tasks st JOIN task_vacancies tv ON tv.task_id=st.id WHERE st.context_id=? AND tv.vacancy_id=? ORDER BY st.id DESC LIMIT 1",
                               (state["active_context_id"],arguments["vacancy_id"])).fetchone()
         trace = TaskTrace.existing(self.database,task["id"],self.settings) if task else None
-        period = (trace.data.get("publication_period") if trace else None) or resolve_period(
+        period = (json.loads(task["search_queries"] or "{}").get("publication_period") if task else None) or resolve_period(
             state["context"]["criteria"],self.settings.values["search"],now())
         warnings = yield from self._refresh_assessments(manager,state,[arguments["vacancy_id"]],trace,period)
         with self.database.transaction() as db:

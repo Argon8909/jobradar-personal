@@ -50,7 +50,8 @@ class TaskTrace:
                 "prompt_sha256":hashlib.sha256(messages[0]["content"].encode()).hexdigest(),
                 "attempt":attempt+1,"is_repair":attempt>0,"elapsed_ms":elapsed_ms,
                 "status":"error" if error else "success","error":self.redact(error),
-                "finish_reason":response.get("finish_reason"),"usage":response.get("usage")}
+                "finish_reason":response.get("finish_reason"),"usage":response.get("usage"),
+                "transport_attempts":response.get("transport_attempts",1)}
         call["capture_mode"] = self.options.get("capture_llm","errors")
         call["parameters"] = self.llm_options
         capture = self.options.get("capture_llm","errors")

@@ -35,7 +35,7 @@ class DeepSeekClient:
         self._opener = opener
         self._sleep = sleeper
 
-    def complete(self, messages, *, tools=None, json_mode=False, deadline=None):
+    def complete(self, messages, *, tools=None, json_mode=False, deadline=None, on_retry=None):
         options = self.settings.values["llm"]
         key = self._key or read_api_key(self.settings.config_path.parent.parent / ".env")
         payload = {"model": options["model"], "messages": messages,
@@ -57,6 +57,10 @@ class DeepSeekClient:
                 if remaining <= 0:
                     raise LLMError("Достигнут предел времени поисковой задачи.",code="LLM_TIMEOUT")
                 timeout = min(timeout,remaining)
+            if attempt and on_retry:
+                # The caller already charged the first attempt. A transport
+                # retry must reserve another call before making another request.
+                on_retry()
             try:
                 with self._opener(req, timeout=timeout) as response:
                     result = json.load(response)
@@ -79,6 +83,7 @@ class DeepSeekClient:
                               and type(value) is int and value >= 0} if isinstance(usage,dict) else {}
                 record("llm","generation_completed",attempt=attempt+1,**safe_usage)
                 return {"role": "assistant", "content": content,"finish_reason":choice.get("finish_reason"),"usage":safe_usage,
+                        "transport_attempts":attempt+1,
                         **({"tool_calls": calls} if calls else {})}
             except error.HTTPError as exc:
                 retryable = exc.code == 429 or 500 <= exc.code <= 599

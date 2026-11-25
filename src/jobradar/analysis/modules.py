@@ -46,10 +46,16 @@ class StructuredLLM:
                                "message":"Запрошено однократное исправление структуры ответа модели."})
             try:
                 start = time.monotonic()
-                response = self.client.complete(messages,json_mode=True,deadline=self.budget.deadline)
+                calls_before = self.budget.calls
+                response = self.client.complete(messages,json_mode=True,deadline=self.budget.deadline,on_retry=self.budget.consume)
+            except SearchStop as exc:
+                error = AnalysisError(exc.code,stage,str(exc))
+                self._record(prompt_name,messages,schema,{"content":None,"transport_attempts":1+self.budget.calls-calls_before},attempt,start,error)
+                raise
             except LLMError as exc:
                 error = AnalysisError(exc.code,stage,str(exc))
-                self._record(prompt_name,messages,schema,{"content":getattr(exc,"response_content",None)},attempt,start,error)
+                self._record(prompt_name,messages,schema,{"content":getattr(exc,"response_content",None),
+                    "transport_attempts":1+self.budget.calls-calls_before},attempt,start,error)
                 raise error from None
             content = response.get("content")
             try:
@@ -102,6 +108,7 @@ class SearchPlanner:
         resolutions = {item["input"].strip().casefold():item for item in output.get("resolved_locations",[])}
         broad = re.compile(r"ближн\w*\s+зарубеж\w*|ближайш\w*\s+зарубеж\w*|постсовет\w*|\bснг\b|\bевроп\w*\b|\bзарубеж\w*\b",re.I)
         for query in plan["queries"]:
+            proposed_areas = query.get("areas",[])
             if broad.search(query["text"]):
                 raise SearchStop("LOCATION_CLARIFICATION","Уточните страны поиска: географическую группу нужно преобразовать в регионы, а не использовать как ключевые слова вакансии.")
             if query["source"] not in sources:
@@ -122,6 +129,12 @@ class SearchPlanner:
             locations = list(dict.fromkeys(resolved))
             remote = {"удалённо","удаленно","удалёнка","удаленка","remote","удалённая работа","удаленная работа"}
             query["areas"] = [name for name in locations if name.strip().casefold() not in remote]
+            normalize = lambda names: {" ".join(name.split()).casefold() for name in names
+                                       if name.strip().casefold() not in remote}
+            if normalize(criteria.get("locations",[])) and proposed_areas and normalize(proposed_areas) != normalize(query["areas"]):
+                raise SearchStop("LOCATION_CLARIFICATION",
+                    "Регион плана отличается от сохранённой географии. Разовая смена сохранённого региона пока не поддерживается; "
+                    "уточните, нужно ли изменить географию текущего контекста. Условия не изменены, поиск не выполнен.")
             if len(query["areas"]) != len(locations):
                 self.llm.warn("LOCATION_IS_FORMAT","search_planner","Удалённая работа распознана как формат работы, а не география.")
             # Algorithm 1.0 selects only keywords and areas by default. The

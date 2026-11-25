@@ -85,7 +85,7 @@ def load_settings(path: str | Path) -> Settings:
     for section, key in (("llm", "max_tokens"), ("dialogue", "max_llm_calls"),
                          ("search", "max_llm_calls"), ("search", "target_count")):
         value = values[section].get(key)
-        if value is not None and (type(value) is not int or value <= 0):
+        if key in values[section] and (type(value) is not int or value <= 0):
             raise ValueError(f"{section}.{key} must be a positive integer")
     if "hh" in values and (not isinstance(values["hh"],dict) or type(values["hh"].get("headless",False)) is not bool):
         raise ValueError("hh.headless must be a boolean")
@@ -94,7 +94,7 @@ def load_settings(path: str | Path) -> Settings:
         raise ValueError("search.vacancy_max_age_days must be null or an integer between 1 and 36500")
     for section,key in (("hh","manual_action_timeout_seconds"),("source","content_timeout_seconds")):
         value = values.get(section,{}).get(key)
-        if value is not None and (type(value) is not int or value <= 0):
+        if key in values.get(section,{}) and (type(value) is not int or value <= 0):
             raise ValueError(f"{section}.{key} must be a positive integer")
     repairs = values["retries"].get("max_structural_repairs",1)
     diagnostics = values.get("diagnostics",{})
@@ -102,7 +102,7 @@ def load_settings(path: str | Path) -> Settings:
         raise ValueError("diagnostics.capture_llm must be off, errors or all")
     for key in ("retention_days","max_response_chars","max_file_bytes"):
         value = diagnostics.get(key)
-        if value is not None and (type(value) is not int or value <= 0):
+        if key in diagnostics and (type(value) is not int or value <= 0):
             raise ValueError(f"diagnostics.{key} must be a positive integer")
     if type(repairs) is not int or not 0 <= repairs <= 1:
         raise ValueError("retries.max_structural_repairs must be 0 or 1")
