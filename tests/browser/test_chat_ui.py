@@ -222,6 +222,39 @@ class BrowserChatTests(unittest.TestCase):
         expect(self.page.locator('#summary')).to_contain_text('Исключено по возрасту: 1')
         expect(self.page.locator('#summary')).to_contain_text('Дата публикации неизвестна: 1')
 
+    def test_geography_panel_shows_active_context_proposal_and_applied_regions(self):
+        from jobradar.profiles import ProfileManager
+        from jobradar.search.service import SearchService
+        from jobradar.events import collect
+        from test_search import FixtureLLM, FixtureSource, raw
+        with self.db.connection() as db:
+            session_id=db.execute('select id from user_sessions order by id desc limit 1').fetchone()[0]
+        manager=ProfileManager(self.db,1,session_id)
+        manager.create_profile('Системный аналитик',authorized=True)
+        manager.update_context({'locations':['Россия']},authorized=True)
+        client=FixtureLLM();original=client.complete
+        def proposal(messages,**kwargs):
+            result=original(messages,**kwargs)
+            if 'планирования' in messages[0]['content']:
+                data=json.loads(result['content']);data['search_queries']['queries'][0]['areas']=['Казахстан']
+                result['content']=json.dumps(data)
+            return result
+        client.complete=proposal
+        service=SearchService(self.db,load_settings(ROOT/'config/v0.2.json'),client,{'hh':FixtureSource([raw('1')])})
+        report=collect(service.search(manager,{'request':'давай снова поищем вакансии системного аналитика'},manager.get_state()))
+        self.page.goto(f'http://127.0.0.1:{self.server.server_port}/diagnostics')
+        expect(self.page.locator('#context')).to_contain_text('Системный аналитик')
+        expect(self.page.locator('#context')).to_contain_text('сохранённая география: Россия')
+        expect(self.page.locator('#summary')).to_contain_text('Казахстан')
+        expect(self.page.locator('#plan')).to_contain_text('Россия')
+        expect(self.page.locator('#plan')).not_to_contain_text('Казахстан')
+        with self.page.expect_download() as info:
+            self.page.locator('#export').click()
+        payload=json.loads(Path(info.value.path()).read_text())
+        self.assertEqual(payload['task_id'],report['task_id'])
+        self.assertEqual(payload['active_context']['saved_locations'],['Россия'])
+        self.assertEqual(payload['diagnostics']['context_at_start']['context_id'],manager.get_state()['active_context_id'])
+
     def test_hh_preserves_format_filter_and_deduplicates_across_queries(self):
         from urllib.parse import parse_qs,urlparse
         from jobradar.sources.hh import HHAdapter

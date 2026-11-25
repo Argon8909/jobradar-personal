@@ -9,6 +9,16 @@ from datetime import datetime, timezone
 from jobradar.diagnostics import record
 
 
+def context_snapshot(state):
+    """Only IDs, names, revisions and geography; no profile payload or secrets."""
+    profile, context = state.get("profile") or {}, state.get("context") or {}
+    return {"profile_id":profile.get("profile_id"),
+            "profession":profile.get("profile_data",{}).get("profession"),
+            "profile_revision":profile.get("revision"),"context_id":state.get("active_context_id"),
+            "context_name":context.get("name"),"criteria_revision":context.get("criteria_revision"),
+            "saved_locations":list(context.get("criteria",{}).get("locations",[]))}
+
+
 class TaskTrace:
     def __init__(self, database, task_id, settings=None):
         self.path = database.path.parent / "search-diagnostics" / f"task-{task_id}.json"

@@ -130,13 +130,14 @@ class Stage4Regressions(unittest.TestCase):
         self.assertIn('лимит',result['answer'])
         self.assertEqual(result['llm_calls'],1)
 
-    def test_conflicting_planner_region_is_not_silently_replaced_by_saved_region(self):
+    def test_explicit_region_change_requires_clarification_without_saving(self):
         self.manager.update_context({'locations':['Россия']},authorized=True)
         before=self.manager.get_state();original=self.client.complete
         def foreign_region(messages,**kwargs):
             result=original(messages,**kwargs)
             if 'планирования' in messages[0]['content']:
                 value=json.loads(result['content']);value['search_queries']['queries'][0]['areas']=['Казахстан']
+                value['geography_change']={'locations':['Казахстан'],'evidence':'в Казахстане'}
                 result['content']=json.dumps(value)
             return result
         self.client.complete=foreign_region

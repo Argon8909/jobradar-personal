@@ -14,7 +14,7 @@ from jobradar.storage import search as tasks, vacancies
 from jobradar.storage.profiles import now
 from .budget import SearchStop, TaskBudget
 from .filters import hard_mismatch, preliminary_mismatch, candidate_priority
-from .trace import TaskTrace, attach_diagnostics
+from .trace import TaskTrace, attach_diagnostics, context_snapshot
 from .period import resolve_period, date_state, period_label, availability_observed
 
 class SearchService:
@@ -45,6 +45,7 @@ class SearchService:
             manager._active(db)
             task_id = tasks.create_task(db,state,goal,target)
         trace = TaskTrace(self.database,task_id,self.settings)
+        trace.data["context_at_start"] = context_snapshot(state)
         trace.prune()
         structured = StructuredLLM(self.client,self.settings,budget,observer=trace.issue,recorder=trace)
         planner, analyzer, resolver = SearchPlanner(structured), VacancyAnalyzer(structured), TagResolver(self.database,structured)
@@ -409,6 +410,8 @@ class SearchService:
             result["search_plan"] = json.loads(current["search_queries"]) if current["search_queries"] else None
             result["created_at"] = current["created_at"]
             result["completed_at"] = current["completed_at"]
+            result["active_context"] = context_snapshot(state)
+            result["task_context_id"] = current["context_id"]
         return attach_diagnostics(result,TaskTrace.load(self.database,result["task_id"]))
 
     def _refresh_assessments(self, manager, state, ids, trace=None, period=None):

@@ -12,6 +12,7 @@ from flask import Flask, Response, jsonify, render_template, request, session, s
 
 from jobradar.orchestration.service import Orchestrator
 from jobradar.profiles import ProfileError
+from jobradar.search.trace import context_snapshot
 
 
 def session_secret(env_path: Path):
@@ -91,7 +92,8 @@ def create_app(database, settings, *, secret_key=None, client_factory=None):
         with database.connection() as db:
             rows = db.execute("SELECT id,state,created_at,completed_at FROM search_tasks WHERE context_id=? ORDER BY id DESC LIMIT 100",
                               (active["active_context_id"],)).fetchall()
-        return jsonify(tasks=[dict(row) for row in rows],context_name=active["context"]["name"] if active["context"] else None)
+        return jsonify(tasks=[dict(row) for row in rows],context_name=active["context"]["name"] if active["context"] else None,
+                       active_context=context_snapshot(active))
 
     @app.get("/api/state")
     def state():

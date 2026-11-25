@@ -44,5 +44,7 @@ PLAN = obj({"version":{"const":1},"queries":{"type":"array","minItems":1,"maxIte
 PUBLICATION_PERIOD = obj({"unit":{"enum":["days","weeks","months","default","unlimited"]},
                           "value":{"type":["integer","null"],"minimum":1},
                           "evidence":{"type":"string","minLength":1}},("unit","value","evidence"))
-PLANNER_OUTPUT = obj({"publication_period":PUBLICATION_PERIOD,"search_queries":PLAN,"resolved_locations":{"type":"array","maxItems":30,"items":obj({"input":TEXT,"areas":{"type":"array","minItems":1,"maxItems":30,"items":TEXT},"explanation":TEXT},("input","areas","explanation"))},"target_count":{"type":["integer","null"],"minimum":1,"maximum":2147483647,
+GEOGRAPHY_CHANGE = obj({"locations":{**STRINGS,"maxItems":30},
+                        "evidence":{**TEXT,"minLength":1}},("locations","evidence"))
+PLANNER_OUTPUT = obj({"geography_change":GEOGRAPHY_CHANGE,"publication_period":PUBLICATION_PERIOD,"search_queries":PLAN,"resolved_locations":{"type":"array","maxItems":30,"items":obj({"input":TEXT,"areas":{"type":"array","minItems":1,"maxItems":30,"items":TEXT},"explanation":TEXT},("input","areas","explanation"))},"target_count":{"type":["integer","null"],"minimum":1,"maximum":2147483647,
                      "description":"Явно запрошенное число вакансий для изучения; null если пользователь не указал."}},("search_queries","target_count"))

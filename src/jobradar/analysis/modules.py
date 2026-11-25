@@ -31,6 +31,10 @@ class StructuredLLM:
         if self.observer:
             self.observer(AnalysisError(code,stage,message,path=path,details=details).diagnostic("warning"))
 
+    def note(self, code, stage, message, *, details):
+        if self.observer:
+            self.observer(AnalysisError(code,stage,message,details=details).diagnostic("info"))
+
     def call(self, prompt_name, data, schema, *, validation_schema=None, check=None):
         prompt = (self.settings.prompts_dir / (prompt_name + ".md")).read_text(encoding="utf-8")
         messages = [
@@ -105,6 +109,22 @@ class SearchPlanner:
                 raise SearchStop("PERIOD_CLARIFICATION",str(error)) from None
         plan = output["search_queries"]
         criteria = state["context"]["criteria"]
+        self.llm.note("LOCATION_PLAN","search_planner","География активного контекста и предложение модели.",details={
+            "context_id":state["active_context_id"],"saved_locations":criteria.get("locations",[]),
+            "proposed_queries":[{"text":query["text"],"areas":query.get("areas",[])} for query in plan["queries"]],
+            "geography_change":output.get("geography_change")})
+        remote = {"удалённо","удаленно","удалёнка","удаленка","remote","удалённая работа","удаленная работа"}
+        normalize = lambda names: {" ".join(name.split()).casefold() for name in names
+                                   if name.strip().casefold() not in remote}
+        change = output.get("geography_change")
+        if change:
+            if not request or not change["evidence"].strip() or change["evidence"] not in request:
+                raise SearchStop("LOCATION_CLARIFICATION","Не удалось подтвердить изменение географии текущим запросом. Уточните нужные регионы; условия не изменены.")
+            if normalize(change["locations"]) != normalize(criteria.get("locations",[])):
+                raise SearchStop("LOCATION_CLARIFICATION",
+                    "Вы запросили географию, отличную от сохранённой географии активного контекста. "
+                    "Разовая смена пока не поддерживается; нужно ли сохранить новые регионы в этом контексте? "
+                    "Без вашего разрешения условия не изменены, поиск не выполнен.")
         resolutions = {item["input"].strip().casefold():item for item in output.get("resolved_locations",[])}
         broad = re.compile(r"ближн\w*\s+зарубеж\w*|ближайш\w*\s+зарубеж\w*|постсовет\w*|\bснг\b|\bевроп\w*\b|\bзарубеж\w*\b",re.I)
         for query in plan["queries"]:
@@ -115,7 +135,7 @@ class SearchPlanner:
                 raise LLMError("План поиска содержит неподключённый источник.")
             query.setdefault("filters",{})
             # The planner cannot silently discard the user's explicit hard filters.
-            locations = criteria.get("locations") or query.get("areas",[])
+            locations = criteria.get("locations",[])
             resolved = []
             for name in locations:
                 if broad.search(name):
@@ -127,14 +147,11 @@ class SearchPlanner:
                 else:
                     resolved.append(name)
             locations = list(dict.fromkeys(resolved))
-            remote = {"удалённо","удаленно","удалёнка","удаленка","remote","удалённая работа","удаленная работа"}
             query["areas"] = [name for name in locations if name.strip().casefold() not in remote]
-            normalize = lambda names: {" ".join(name.split()).casefold() for name in names
-                                       if name.strip().casefold() not in remote}
-            if normalize(criteria.get("locations",[])) and proposed_areas and normalize(proposed_areas) != normalize(query["areas"]):
-                raise SearchStop("LOCATION_CLARIFICATION",
-                    "Регион плана отличается от сохранённой географии. Разовая смена сохранённого региона пока не поддерживается; "
-                    "уточните, нужно ли изменить географию текущего контекста. Условия не изменены, поиск не выполнен.")
+            if normalize(proposed_areas) != normalize(query["areas"]):
+                self.llm.note("LOCATION_PLAN_CORRECTED","search_planner",
+                    "Регионы предложения модели заменены действующей географией активного контекста.",
+                    details={"proposed_areas":proposed_areas,"applied_areas":query["areas"]})
             if len(query["areas"]) != len(locations):
                 self.llm.warn("LOCATION_IS_FORMAT","search_planner","Удалённая работа распознана как формат работы, а не география.")
             # Algorithm 1.0 selects only keywords and areas by default. The

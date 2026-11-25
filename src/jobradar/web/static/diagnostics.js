@@ -35,6 +35,11 @@ function render() {
   paragraph(el("summary"),`Создан: ${report.created_at || "—"}; завершён: ${report.completed_at || "—"}`);
   if (report.stop_reason) paragraph(el("summary"),`Причина завершения: ${report.stop_reason}`);
   const trace=report.diagnostics;
+  if (trace?.context_at_start) json(el("summary"),"Профиль, контекст и география на старте",trace.context_at_start);
+  else paragraph(el("summary"),"Снимок контекста на старте не сохранён: текущие условия могли измениться после этого поиска.");
+  const geography=(trace?.issues || []).find(item => item.code==="LOCATION_PLAN");
+  if (geography) json(el("summary"),"Сохранённая география и регионы, предложенные Planner",geography.details);
+
   const period=report.publication_period || trace?.publication_period;
   if (period) {
     const units={days:"календарных дней",weeks:"недель",months:"календарных месяцев"};
@@ -76,7 +81,10 @@ async function load(keep=true) {
   try {
     const before=keep ? el("tasks").value : "";
     const list=await api("/api/search-diagnostics/tasks");
-    el("context").textContent=list.context_name || "Общий диалог — выберите контекст в чате";
+    const active=list.active_context;
+    el("context").textContent=active?.context_id ?
+      `Сейчас: профиль #${active.profile_id} «${active.profession}»; контекст #${active.context_id} «${active.context_name}»; сохранённая география: ${active.saved_locations.join(", ") || "не ограничена"}; ревизия критериев: ${active.criteria_revision}.` :
+      "Общий диалог — выберите контекст в чате";
     const latest=document.createElement("option");latest.value="";latest.textContent="Последний поиск (автоматически)";
     el("tasks").replaceChildren(latest,...list.tasks.map(task => {const option=document.createElement("option");option.value=task.id;option.textContent=`#${task.id} · ${task.state} · ${task.created_at}`;return option;}));
     if (list.tasks.some(task => String(task.id)===before)) el("tasks").value=before;
